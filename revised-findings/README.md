@@ -13,10 +13,29 @@ Compacted research findings focused on actionable MVP development for real-time 
 | Document | Purpose |
 |----------|---------|
 | [01-CORE-KNOWLEDGE.md](./01-CORE-KNOWLEDGE.md) | Compacted tech stack, platform decisions, latency budget |
-| [02-MVP-UX-STRATEGY.md](./02-MVP-UX-STRATEGY.md) | User flows, UI wireframes, accessibility |
+| [02-MVP-UX-STRATEGY.md](./02-MVP-UX-STRATEGY.md) | Live streaming UX: user flows, wireframes, accessibility |
 | [03-DEPLOYMENT-PIPELINE.md](./03-DEPLOYMENT-PIPELINE.md) | CI/CD, containers, OTA updates, testing |
 | [04-MARKET-ANALYSIS.md](./04-MARKET-ANALYSIS.md) | TAM, adoption signals, pricing, competition |
 | [05-PRODUCT-SOLUTIONS.md](./05-PRODUCT-SOLUTIONS.md) | Ready-to-use Jetson software, containers, tools |
+| [06-STATIC-VIDEO-UX.md](./06-STATIC-VIDEO-UX.md) | **Static/web video UX + RAG agent architecture** |
+
+---
+
+## Two MVP Approaches
+
+### Track A: Static Video + RAG Agent (Recommended Start)
+Simpler to build, no WebRTC complexity, enables multi-video RAG queries.
+- Upload/URL video processing
+- Keyframe extraction + indexing
+- VLM descriptions + embeddings
+- Natural language agent with tool use
+
+### Track B: Live Streaming (Production Goal)
+Real-time surveillance and monitoring use cases.
+- WebRTC streaming
+- Live detection overlays
+- Real-time VLM alerts
+- Camera integration (RTSP/ONVIF)
 
 ---
 
@@ -62,14 +81,21 @@ docker-compose pull && docker-compose up -d
 
 ---
 
-## Next Steps
+## Next Steps (Recommended: Start with Track A)
 
-1. **Week 1:** Set up Jetson AGX Orin with JetPack 6.2
-2. **Week 2:** Deploy NanoLLM + DeepStream containers
-3. **Week 3:** Build custom FastAPI wrapper
-4. **Week 4:** Implement WebRTC streaming + web UI
-5. **Week 5:** Integration testing, latency optimization
-6. **Week 6:** Deploy, benchmark, iterate
+### Phase 1: Static Video Platform
+1. Set up Jetson AGX Orin with JetPack 6.2
+2. Deploy NanoLLM + YOLO containers
+3. Build FastAPI backend with video processing pipeline
+4. Implement ChromaDB for vector storage
+5. Build RAG agent with tool use (detection, VLM, search)
+6. Create web UI for upload + chat
+
+### Phase 2: Add Live Streaming
+7. Integrate DeepStream for video pipeline
+8. Add WebRTC streaming output
+9. Implement real-time detection overlays
+10. Connect live streams to RAG index
 
 ---
 
