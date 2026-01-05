@@ -18,6 +18,7 @@ Upload Video → Process (VLM + Detection) → Index → Ask Questions in Plain 
 | [02-TECHNICAL-DECISIONS.md](./02-TECHNICAL-DECISIONS.md) | ADRs for all major technology choices | Engineering |
 | [03-ARCHITECTURE.md](./03-ARCHITECTURE.md) | System design, components, data flows | Engineering |
 | [04-DEPLOYMENT-DEVOPS.md](./04-DEPLOYMENT-DEVOPS.md) | CI/CD, Docker, Jetson setup, operations | DevOps, Engineering |
+| [05-REFERENCE-PROJECTS.md](./05-REFERENCE-PROJECTS.md) | Relevant open-source repos and tools | Engineering |
 
 ---
 
@@ -105,13 +106,6 @@ docker-compose up -d
 │  └─────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Related Documentation
-
-- [Research Findings](../Findings/) - Original research phase
-- [Revised Findings](../revised-findings/) - Compacted knowledge, UX strategies
 
 ---
 
