@@ -34,38 +34,219 @@ Components communicate through events, not direct calls. This enables:
 - **Testability** - Emit mock events, verify handlers
 - **Debuggability** - Log all events for replay/analysis
 
-### Event Flow
+### Event Flow Architecture
 
+```mermaid
+flowchart TB
+    subgraph Sources ["Event Sources"]
+        DS[DeepStream Pipeline]
+        API[REST API]
+        WS[WebSocket Client]
+    end
+
+    subgraph EventBus ["Event Bus"]
+        BUS((Event Bus))
+    end
+
+    subgraph Processors ["Event Processors"]
+        DET[Detector]
+        SAM[Sampler]
+        VLM[VLM Summarizer]
+        AGT[Agent]
+        ALT[Alert Checker]
+    end
+
+    subgraph State ["State Listeners"]
+        MEM[Memory Store]
+        CUR[Current State]
+    end
+
+    subgraph Outputs ["Output Listeners"]
+        WSH[WebSocket Handler]
+        LOG[Event Logger]
+        HOOK[Custom Hooks]
+    end
+
+    %% Source emissions
+    DS -->|frame.new| BUS
+    DS -->|source.connected| BUS
+    DS -->|source.disconnected| BUS
+    API -->|query.received| BUS
+    WS -->|query.received| BUS
+
+    %% Bus to processors
+    BUS -->|frame.new| DET
+    BUS -->|frame.new| SAM
+    BUS -->|sample.ready| VLM
+    BUS -->|query.received| AGT
+    BUS -->|detection.complete| ALT
+
+    %% Processor emissions
+    DET -->|detection.complete| BUS
+    SAM -->|sample.ready| BUS
+    VLM -->|summary.new| BUS
+    AGT -->|response.ready| BUS
+    ALT -->|alert.triggered| BUS
+
+    %% State listeners
+    BUS -->|detection.complete| MEM
+    BUS -->|summary.new| MEM
+    BUS -->|detection.complete| CUR
+    BUS -->|summary.new| CUR
+
+    %% Output listeners
+    BUS -->|"*"| WSH
+    BUS -->|"*"| LOG
+    BUS -->|"*"| HOOK
+
+    %% Styling
+    style BUS fill:#f96,stroke:#333,stroke-width:3px
+    style DS fill:#6f9,stroke:#333
+    style API fill:#6f9,stroke:#333
+    style WS fill:#6f9,stroke:#333
+    style HOOK fill:#96f,stroke:#333,stroke-dasharray: 5 5
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              EVENT BUS                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────┐                                                           │
-│  │ DeepStream   │───► frame.new ───┬───► Detector ───► detection.complete  │
-│  │ Pipeline     │                  │                          │             │
-│  └──────────────┘                  │                          ├───► Memory  │
-│                                    │                          ├───► UI      │
-│                                    │                          └───► Alerts  │
-│                                    │                                  │     │
-│                                    └───► Sampler ───► sample.ready    │     │
-│                                              │                        │     │
-│                                              ▼                        │     │
-│                                         VLM Summarizer                │     │
-│                                              │                        │     │
-│                                              ▼                        │     │
-│                                       summary.new ────────────────────┤     │
-│                                                                       │     │
-│  ┌──────────────┐                                                     ▼     │
-│  │ API/WebSocket│◄──── response.ready ◄──── Agent ◄──── query.received     │
-│  │              │◄──── alert.triggered ◄────────────────────────────────    │
-│  └──────────────┘                                                           │
-│                                                                              │
-│  ┌──────────────┐                                                           │
-│  │ Your Hook    │◄──── [any event] ◄──── bus.on("event.type", handler)     │
-│  └──────────────┘                                                           │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+### Event Lifecycle Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DS as DeepStream
+    participant BUS as Event Bus
+    participant DET as Detector
+    participant SAM as Sampler
+    participant VLM as VLM Summarizer
+    participant MEM as Memory
+    participant ALT as Alert Checker
+    participant WS as WebSocket
+    participant UI as Frontend
+
+    Note over DS,UI: Video Processing Flow
+
+    DS->>BUS: emit(source.connected)
+    BUS->>WS: forward(source.connected)
+    WS->>UI: send(source.connected)
+
+    loop Every Frame
+        DS->>BUS: emit(frame.new)
+
+        par Detection Path
+            BUS->>DET: on(frame.new)
+            DET->>DET: run YOLO inference
+            DET->>BUS: emit(detection.complete)
+            BUS->>MEM: on(detection.complete)
+            BUS->>ALT: on(detection.complete)
+            BUS->>WS: forward(detection.complete)
+            WS->>UI: send(detections)
+        and Sampling Path
+            BUS->>SAM: on(frame.new)
+            alt Every N seconds
+                SAM->>BUS: emit(sample.ready)
+                BUS->>VLM: on(sample.ready)
+                VLM->>VLM: run VILA inference
+                VLM->>BUS: emit(summary.new)
+                BUS->>MEM: on(summary.new)
+                BUS->>WS: forward(summary.new)
+                WS->>UI: send(summary)
+            end
+        end
+
+        opt Alert Condition Met
+            ALT->>BUS: emit(alert.triggered)
+            BUS->>WS: forward(alert.triggered)
+            WS->>UI: send(alert)
+        end
+    end
+
+    Note over DS,UI: User Query Flow
+
+    UI->>WS: send(query)
+    WS->>BUS: emit(query.received)
+    BUS->>AGT: on(query.received)
+
+    AGT->>AGT: classify intent
+    AGT->>AGT: execute tool
+
+    alt Tool: describe_now
+        AGT->>VLM: describe(current_frame)
+        VLM-->>AGT: description
+    else Tool: count_objects
+        AGT->>MEM: get_current_detections()
+        MEM-->>AGT: detections
+    else Tool: recent_summary
+        AGT->>MEM: get_recent(time_window)
+        MEM-->>AGT: summaries
+    end
+
+    AGT->>BUS: emit(response.ready)
+    BUS->>WS: forward(response.ready)
+    WS->>UI: send(answer)
+
+    participant AGT as Agent
+```
+
+### Component Event Contract
+
+```mermaid
+flowchart LR
+    subgraph Pipeline ["pipeline/video.py"]
+        V_OUT[/"Emits:<br/>• frame.new<br/>• source.connected<br/>• source.disconnected"/]
+    end
+
+    subgraph Detector ["pipeline/detector.py"]
+        D_IN[\"Listens:<br/>• frame.new"\]
+        D_OUT[/"Emits:<br/>• detection.complete"/]
+    end
+
+    subgraph Sampler ["pipeline/sampler.py"]
+        S_IN[\"Listens:<br/>• frame.new"\]
+        S_OUT[/"Emits:<br/>• sample.ready"/]
+    end
+
+    subgraph VLMSum ["pipeline/vlm.py"]
+        VLM_IN[\"Listens:<br/>• sample.ready"\]
+        VLM_OUT[/"Emits:<br/>• summary.new"/]
+    end
+
+    subgraph Agent ["agent/agent.py"]
+        A_IN[\"Listens:<br/>• query.received"\]
+        A_OUT[/"Emits:<br/>• response.ready"/]
+    end
+
+    subgraph Alerts ["state/alerts.py"]
+        AL_IN[\"Listens:<br/>• detection.complete"\]
+        AL_OUT[/"Emits:<br/>• alert.triggered"/]
+    end
+
+    subgraph Memory ["state/memory.py"]
+        M_IN[\"Listens:<br/>• detection.complete<br/>• summary.new"\]
+    end
+
+    subgraph WebSocket ["api/websocket.py"]
+        WS_IN[\"Listens:<br/>• ALL events"\]
+    end
+
+    V_OUT --> D_IN
+    V_OUT --> S_IN
+    D_OUT --> AL_IN
+    D_OUT --> M_IN
+    S_OUT --> VLM_IN
+    VLM_OUT --> M_IN
+
+    style V_OUT fill:#6f9
+    style D_OUT fill:#6f9
+    style S_OUT fill:#6f9
+    style VLM_OUT fill:#6f9
+    style A_OUT fill:#6f9
+    style AL_OUT fill:#6f9
+    style D_IN fill:#69f
+    style S_IN fill:#69f
+    style VLM_IN fill:#69f
+    style A_IN fill:#69f
+    style AL_IN fill:#69f
+    style M_IN fill:#69f
+    style WS_IN fill:#69f
 ```
 
 ### Standard Events
