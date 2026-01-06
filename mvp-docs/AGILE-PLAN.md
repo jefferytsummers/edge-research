@@ -15,12 +15,15 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 | Component | Technology | Source |
 |-----------|------------|--------|
 | Base Container | `dustynv/nano_llm:r36.4.0` | [jetson-containers](https://github.com/dusty-nv/jetson-containers) |
-| Video Pipeline | DeepStream 7.x + Python bindings | [NVIDIA DeepStream](https://developer.nvidia.com/deepstream-sdk) |
+| Video Pipeline | NanoLLM VideoSource (jetson-utils) | [NanoLLM Plugins](https://dusty-nv.github.io/NanoLLM/plugins.html) |
 | VLM Inference | NanoLLM + VILA-7B AWQ | [NanoLLM](https://github.com/dusty-nv/NanoLLM) |
-| Detection | YOLOv8-s TensorRT INT8 | [Ultralytics + TensorRT](https://docs.ultralytics.com/guides/nvidia-jetson/) |
-| Event Bus | Python asyncio (native) | Lightweight, no external deps |
+| Detection | Custom TensorRT Plugin (YOLOv8-s INT8) | [Ultralytics + TensorRT](https://docs.ultralytics.com/guides/nvidia-jetson/) |
+| Pipeline Orchestration | NanoLLM Plugin Chain | [NanoLLM Plugins](https://dusty-nv.github.io/NanoLLM/plugins.html) |
+| App-Level Events | Python asyncio EventBus | Lightweight, bridges to plugins |
 | API Server | FastAPI + WebSocket | Standard Python |
 | Frontend | React + Video.js | Standard Web |
+
+> **Architecture Note:** Based on [feasibility analysis](./FEASIBILITY-ANALYSIS.md), we use NanoLLM's native plugin architecture for the inference pipeline, with our EventBus as an adapter for application-level events (alerts, queries, API).
 
 ---
 
@@ -39,7 +42,7 @@ Components communicate through events, not direct calls. This enables:
 ```mermaid
 flowchart TB
     subgraph Sources ["Event Sources"]
-        DS[DeepStream Pipeline]
+        DS[NanoLLM Plugin Pipeline]
         API[REST API]
         WS[WebSocket Client]
     end
@@ -112,7 +115,7 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
-    participant DS as DeepStream
+    participant DS as NanoLLM Pipeline
     participant BUS as Event Bus
     participant DET as Detector
     participant SAM as Sampler
@@ -283,21 +286,23 @@ flowchart LR
 
 ## Epic 2: Event Bus & Core Infrastructure
 
-**Goal:** Establish event-driven foundation that all components build upon.
+**Goal:** Establish event-driven foundation that bridges NanoLLM plugins with application logic.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
 | E2.1 | Implement async EventBus class | M | Events emit, handlers fire asynchronously |
-| E2.2 | Add `emit_sync()` for sync contexts | S | DeepStream callbacks can emit events |
+| E2.2 | Add `emit_sync()` for threaded contexts | S | NanoLLM plugin threads can emit events |
 | E2.3 | Create typed Event dataclasses | S | All standard events have typed definitions |
 | E2.4 | Implement handler registration decorators | S | `@bus.on("event.type")` decorator works |
 | E2.5 | Add event logging middleware | S | All events logged with timestamps |
 | E2.6 | Create event replay utility for debugging | M | Can replay logged events for testing |
-| E2.7 | Write EventBus unit tests | M | Full test coverage of bus functionality |
+| E2.7 | Create NanoLLM EventBusPlugin adapter | M | Bridges plugin outputs to EventBus |
+| E2.8 | Write EventBus unit tests | M | Full test coverage of bus functionality |
 
 **Technical Notes:**
 - Use Python asyncio Queue for event processing
-- Keep synchronous `emit_sync()` for DeepStream probe callbacks
+- Keep synchronous `emit_sync()` for NanoLLM plugin threads (they're threaded, not async)
+- NanoLLM plugins have output channels → EventBusPlugin converts to our events
 - Events are fire-and-forget; handlers shouldn't block
 
 **Reference Implementation:**
@@ -305,73 +310,127 @@ flowchart LR
 class EventBus:
     def on(self, event_type: str, handler: Callable): ...
     async def emit(self, event: Event): ...
-    def emit_sync(self, event: Event): ...  # For sync contexts
+    def emit_sync(self, event: Event): ...  # For threaded plugin contexts
+
+class EventBusPlugin(Plugin):
+    """Bridges NanoLLM plugin outputs to our EventBus."""
+    def process(self, input, **kwargs):
+        if isinstance(input, Detection):
+            self.bus.emit_sync(Event("detection.complete", input))
+        elif isinstance(input, str):
+            self.bus.emit_sync(Event("summary.new", {"text": input}))
 ```
 
 ---
 
 ## Epic 3: Video Input Pipeline
 
-**Goal:** Receive video from RTSP or USB camera, emit frame events.
+**Goal:** Receive video from RTSP or USB camera using NanoLLM's VideoSource plugin.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E3.1 | Create DeepStream pipeline for RTSP input | M | Connects to RTSP URL, decodes frames |
-| E3.2 | Create DeepStream pipeline for USB camera | M | Reads from /dev/video0, decodes frames |
-| E3.3 | Add probe callback that emits `frame.new` | M | Every frame triggers event with numpy array |
+| E3.1 | Configure NanoLLM VideoSource for RTSP input | M | Connects to RTSP URL, decodes frames |
+| E3.2 | Configure NanoLLM VideoSource for USB camera | M | Reads from /dev/video0, decodes frames |
+| E3.3 | Connect VideoSource to EventBusPlugin | M | Frames flow through plugin chain to EventBus |
 | E3.4 | Implement frame buffer for current frame access | S | Latest frame available via `get_current_frame()` |
 | E3.5 | Emit `source.connected` on successful connect | S | Event includes resolution, fps |
 | E3.6 | Emit `source.disconnected` on failure/disconnect | S | Event includes reason |
 | E3.7 | Add pipeline health monitoring | S | Detect issues, emit `error.occurred` |
-| E3.8 | Create abstraction layer for input source switching | M | Switch RTSP↔USB via config |
+| E3.8 | Create config-based source switching | M | Switch RTSP↔USB via YAML config |
 
 **Technical Notes:**
-- Use `get_nvds_buf_surface()` for NumPy conversion per [DeepStream Python docs](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Python_Sample_Apps.html)
-- Probe callbacks are synchronous - use `emit_sync()` and keep processing minimal
-- Hardware decode via NVDEC is automatic in DeepStream
+- NanoLLM VideoSource uses jetson-utils (hardware accelerated)
+- Supports RTSP, V4L2 (USB/CSI), and video files
+- Plugin runs in its own thread with queue-based processing
+- Connect to downstream plugins: `video.add(detector)`, `video.add(sampler)`
+
+**Reference:**
+```python
+from nano_llm.plugins import VideoSource
+
+video = VideoSource(
+    video_source="rtsp://camera:554/stream",  # or /dev/video0
+    video_output=None  # We handle output via plugins
+)
+video.add(detector_plugin)
+video.add(sampler_plugin)
+```
 
 ---
 
 ## Epic 4: Object Detection Integration
 
-**Goal:** Listen for frames, emit detection results.
+**Goal:** Create custom NanoLLM plugin for YOLOv8 detection with TensorRT.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
 | E4.1 | Export YOLOv8s to TensorRT INT8 engine | M | Engine file generated, loads on Jetson |
-| E4.2 | Integrate YOLO as DeepStream nvinfer plugin | M | Detections in pipeline metadata |
-| E4.3 | Create Detector class that listens to `frame.new` | M | Processes frames from event bus |
-| E4.4 | Emit `detection.complete` with results | S | Event includes detections list, frame_id |
+| E4.2 | Create YOLODetectorPlugin extending NanoLLM Plugin | M | Plugin processes frames, outputs detections |
+| E4.3 | Implement TensorRT inference wrapper | M | Loads engine, runs inference, returns boxes |
+| E4.4 | Connect detector to EventBusPlugin | S | Detections flow to EventBus |
 | E4.5 | Implement Detection dataclass | S | Standardized format: class, confidence, bbox |
 | E4.6 | Add confidence threshold configuration | S | Configurable via YAML |
 | E4.7 | Benchmark detection latency | S | Measure and log inference time |
 
 **Technical Notes:**
 - Target <15ms per frame on AGX Orin per [benchmarks](https://wiki.seeedstudio.com/YOLOv8-TRT-Jetson/)
-- Detector subscribes to `frame.new`, emits `detection.complete`
+- Custom plugin follows NanoLLM Plugin pattern (threaded queue)
 - INT8 calibration with COCO subset
+
+**Reference:**
+```python
+from nano_llm import Plugin
+
+class YOLODetectorPlugin(Plugin):
+    def __init__(self, model_path, precision="int8", conf_threshold=0.5):
+        super().__init__(outputs=['detections'])
+        self.engine = TensorRTEngine(model_path, precision)
+        self.threshold = conf_threshold
+
+    def process(self, frame, **kwargs):
+        detections = self.engine.detect(frame, self.threshold)
+        self.output(detections)  # To connected plugins
+```
 
 ---
 
 ## Epic 5: VLM Integration
 
-**Goal:** Generate scene descriptions, emit summaries.
+**Goal:** Generate scene descriptions using NanoLLM's native VLM support.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
 | E5.1 | Load VILA-7B AWQ model via NanoLLM | M | Model loads, responds to test prompt |
-| E5.2 | Create VLM wrapper with describe/query methods | M | `vlm.describe(frame)`, `vlm.query(frame, question)` |
-| E5.3 | Create Sampler that emits `sample.ready` periodically | M | Samples frames every N seconds |
-| E5.4 | Create Summarizer that listens to `sample.ready` | M | Runs VLM on sampled frames |
-| E5.5 | Emit `summary.new` with description text | S | Event includes text, timestamp |
-| E5.6 | Add streaming response support | M | Tokens stream to client as generated |
+| E5.2 | Create VLM plugin wrapper for describe/query | M | `vlm.describe(frame)`, `vlm.query(frame, question)` |
+| E5.3 | Create SamplerPlugin for frame decimation | M | Samples frames every N seconds |
+| E5.4 | Create SummarizerPlugin using NanoLLM VLM | M | Runs VLM on sampled frames |
+| E5.5 | Connect summarizer to EventBusPlugin | S | Summaries flow to EventBus |
+| E5.6 | Add streaming response support | M | Use NanoLLM's StreamingResponse for tokens |
 | E5.7 | Configure max tokens and temperature | S | Configurable via YAML |
-| E5.8 | Handle VLM errors, emit `error.occurred` | S | Timeout, OOM don't crash app |
+| E5.8 | Handle VLM errors gracefully | S | Timeout, OOM don't crash app |
 
 **Technical Notes:**
-- Use NanoLLM's ChatHistory for conversation management per [NanoLLM docs](https://github.com/dusty-nv/NanoLLM)
+- NanoLLM already has optimized VLM inference (VILA, LLaVA)
+- Use NanoLLM's ChatHistory for conversation management
 - Sampler decouples frame rate from VLM rate (VLM is slower)
 - VILA-7B AWQ fits in ~8GB, leaves headroom for detection
+
+**Reference:**
+```python
+from nano_llm import NanoLLM, ChatHistory
+
+model = NanoLLM.from_pretrained(
+    "Efficient-Large-Model/VILA1.5-7b",
+    quantization='awq'
+)
+chat = ChatHistory(model)
+
+# In SummarizerPlugin.process():
+response = model.generate(
+    chat.embed_chat([frame, "Describe this scene."]),
+    streaming=True
+)
+```
 
 ---
 
@@ -562,7 +621,7 @@ class EventBus:
 | Epic | Stories | S | M | L |
 |------|---------|---|---|---|
 | 1. Dev Environment | 6 | 6 | 0 | 0 |
-| 2. Event Bus | 7 | 4 | 3 | 0 |
+| 2. Event Bus | 8 | 4 | 4 | 0 |
 | 3. Video Pipeline | 8 | 4 | 4 | 0 |
 | 4. Detection | 7 | 4 | 3 | 0 |
 | 5. VLM | 8 | 3 | 5 | 0 |
@@ -574,7 +633,7 @@ class EventBus:
 | 11. Frontend | 11 | 3 | 8 | 0 |
 | 12. Deployment | 8 | 4 | 4 | 0 |
 | 13. Testing | 9 | 3 | 6 | 0 |
-| **Total** | **106** | **52** | **54** | **0** |
+| **Total** | **107** | **52** | **55** | **0** |
 
 ---
 
@@ -673,11 +732,13 @@ No changes to core code required.
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Event bus becomes bottleneck | Low | High | Profile, add backpressure if needed |
-| DeepStream + async event integration | Medium | High | Test integration early (Sprint 1-2) |
+| NanoLLM threaded plugin → async EventBus bridging | Medium | Medium | `emit_sync()` with `call_soon_threadsafe`, test early |
+| Custom YOLOv8 TensorRT plugin complexity | Medium | Medium | Follow NanoLLM Plugin pattern, reference examples |
 | Event ordering issues | Low | Medium | Add sequence numbers if needed |
 | VLM latency too high | Low | Medium | VILA-3B fallback available |
 | Memory pressure with all models loaded | Medium | High | Profile memory, tune batch sizes |
 | Handler exceptions break event flow | Medium | Medium | Try/catch in bus, log errors |
+| NanoLLM API changes | Low | Medium | Pin version, monitor releases |
 
 ---
 
