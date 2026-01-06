@@ -6,6 +6,8 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 
 **Product Goal:** Real-time video understanding with natural language interaction on edge hardware.
 
+**Architecture Pattern:** Event-driven for modularity, reusability, and extensibility.
+
 ---
 
 ## Technology Stack (Validated)
@@ -16,8 +18,70 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 | Video Pipeline | DeepStream 7.x + Python bindings | [NVIDIA DeepStream](https://developer.nvidia.com/deepstream-sdk) |
 | VLM Inference | NanoLLM + VILA-7B AWQ | [NanoLLM](https://github.com/dusty-nv/NanoLLM) |
 | Detection | YOLOv8-s TensorRT INT8 | [Ultralytics + TensorRT](https://docs.ultralytics.com/guides/nvidia-jetson/) |
+| Event Bus | Python asyncio (native) | Lightweight, no external deps |
 | API Server | FastAPI + WebSocket | Standard Python |
 | Frontend | React + Video.js | Standard Web |
+
+---
+
+## Event-Driven Architecture
+
+### Core Principle
+
+Components communicate through events, not direct calls. This enables:
+- **Reusability** - Components work anywhere there's an EventBus
+- **Extensibility** - Add hooks without modifying core code
+- **Testability** - Emit mock events, verify handlers
+- **Debuggability** - Log all events for replay/analysis
+
+### Event Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              EVENT BUS                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐                                                           │
+│  │ DeepStream   │───► frame.new ───┬───► Detector ───► detection.complete  │
+│  │ Pipeline     │                  │                          │             │
+│  └──────────────┘                  │                          ├───► Memory  │
+│                                    │                          ├───► UI      │
+│                                    │                          └───► Alerts  │
+│                                    │                                  │     │
+│                                    └───► Sampler ───► sample.ready    │     │
+│                                              │                        │     │
+│                                              ▼                        │     │
+│                                         VLM Summarizer                │     │
+│                                              │                        │     │
+│                                              ▼                        │     │
+│                                       summary.new ────────────────────┤     │
+│                                                                       │     │
+│  ┌──────────────┐                                                     ▼     │
+│  │ API/WebSocket│◄──── response.ready ◄──── Agent ◄──── query.received     │
+│  │              │◄──── alert.triggered ◄────────────────────────────────    │
+│  └──────────────┘                                                           │
+│                                                                              │
+│  ┌──────────────┐                                                           │
+│  │ Your Hook    │◄──── [any event] ◄──── bus.on("event.type", handler)     │
+│  └──────────────┘                                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Standard Events
+
+| Event | Payload | Emitted By | Typical Listeners |
+|-------|---------|------------|-------------------|
+| `frame.new` | frame, timestamp, frame_id | Video Pipeline | Detector, Sampler |
+| `detection.complete` | detections, frame_id | Detector | AlertChecker, Memory, UI |
+| `sample.ready` | frame, frame_id | Sampler | VLM Summarizer |
+| `summary.new` | text, timestamp | VLM Summarizer | Memory, UI |
+| `alert.triggered` | alert_id, condition, frame_id | AlertChecker | Notifier, UI, Logger |
+| `query.received` | question, context, request_id | API | Agent |
+| `response.ready` | answer, citations, request_id | Agent | API, UI |
+| `source.connected` | url, resolution, fps | Pipeline | UI, Logger |
+| `source.disconnected` | reason | Pipeline | UI, Reconnector |
+| `error.occurred` | component, error, context | Any | Logger, UI |
 
 ---
 
@@ -36,234 +100,279 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 
 ---
 
-## Epic 2: Video Input Pipeline
+## Epic 2: Event Bus & Core Infrastructure
 
-**Goal:** Receive video from RTSP or USB camera with hardware-accelerated decode.
+**Goal:** Establish event-driven foundation that all components build upon.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E2.1 | Create DeepStream pipeline for RTSP input | M | Connects to RTSP URL, decodes frames |
-| E2.2 | Create DeepStream pipeline for USB camera | M | Reads from /dev/video0, decodes frames |
-| E2.3 | Add probe callback to extract frames as NumPy | M | Frames accessible in Python as np.ndarray |
-| E2.4 | Implement frame buffer for current frame access | S | Latest frame available via `get_current_frame()` |
-| E2.5 | Add pipeline health monitoring | S | Detect disconnection, log errors |
-| E2.6 | Create abstraction layer for input source switching | M | Switch RTSP↔USB via config |
+| E2.1 | Implement async EventBus class | M | Events emit, handlers fire asynchronously |
+| E2.2 | Add `emit_sync()` for sync contexts | S | DeepStream callbacks can emit events |
+| E2.3 | Create typed Event dataclasses | S | All standard events have typed definitions |
+| E2.4 | Implement handler registration decorators | S | `@bus.on("event.type")` decorator works |
+| E2.5 | Add event logging middleware | S | All events logged with timestamps |
+| E2.6 | Create event replay utility for debugging | M | Can replay logged events for testing |
+| E2.7 | Write EventBus unit tests | M | Full test coverage of bus functionality |
+
+**Technical Notes:**
+- Use Python asyncio Queue for event processing
+- Keep synchronous `emit_sync()` for DeepStream probe callbacks
+- Events are fire-and-forget; handlers shouldn't block
+
+**Reference Implementation:**
+```python
+class EventBus:
+    def on(self, event_type: str, handler: Callable): ...
+    async def emit(self, event: Event): ...
+    def emit_sync(self, event: Event): ...  # For sync contexts
+```
+
+---
+
+## Epic 3: Video Input Pipeline
+
+**Goal:** Receive video from RTSP or USB camera, emit frame events.
+
+| ID | Story | Size | Acceptance Criteria |
+|----|-------|------|---------------------|
+| E3.1 | Create DeepStream pipeline for RTSP input | M | Connects to RTSP URL, decodes frames |
+| E3.2 | Create DeepStream pipeline for USB camera | M | Reads from /dev/video0, decodes frames |
+| E3.3 | Add probe callback that emits `frame.new` | M | Every frame triggers event with numpy array |
+| E3.4 | Implement frame buffer for current frame access | S | Latest frame available via `get_current_frame()` |
+| E3.5 | Emit `source.connected` on successful connect | S | Event includes resolution, fps |
+| E3.6 | Emit `source.disconnected` on failure/disconnect | S | Event includes reason |
+| E3.7 | Add pipeline health monitoring | S | Detect issues, emit `error.occurred` |
+| E3.8 | Create abstraction layer for input source switching | M | Switch RTSP↔USB via config |
 
 **Technical Notes:**
 - Use `get_nvds_buf_surface()` for NumPy conversion per [DeepStream Python docs](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Python_Sample_Apps.html)
-- Probe callbacks are synchronous - keep processing minimal
+- Probe callbacks are synchronous - use `emit_sync()` and keep processing minimal
 - Hardware decode via NVDEC is automatic in DeepStream
 
 ---
 
-## Epic 3: Object Detection Integration
+## Epic 4: Object Detection Integration
 
-**Goal:** Real-time YOLOv8 detection with TensorRT optimization.
+**Goal:** Listen for frames, emit detection results.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E3.1 | Export YOLOv8s to TensorRT INT8 engine | M | Engine file generated, loads on Jetson |
-| E3.2 | Integrate YOLO as DeepStream nvinfer plugin | M | Detections in pipeline metadata |
-| E3.3 | Create detection wrapper with Python API | S | `detector.detect(frame)` returns list |
-| E3.4 | Implement detection result formatting | S | Standardized Detection dataclass |
-| E3.5 | Add confidence threshold configuration | S | Configurable via YAML |
-| E3.6 | Benchmark detection latency | S | Measure and log inference time |
+| E4.1 | Export YOLOv8s to TensorRT INT8 engine | M | Engine file generated, loads on Jetson |
+| E4.2 | Integrate YOLO as DeepStream nvinfer plugin | M | Detections in pipeline metadata |
+| E4.3 | Create Detector class that listens to `frame.new` | M | Processes frames from event bus |
+| E4.4 | Emit `detection.complete` with results | S | Event includes detections list, frame_id |
+| E4.5 | Implement Detection dataclass | S | Standardized format: class, confidence, bbox |
+| E4.6 | Add confidence threshold configuration | S | Configurable via YAML |
+| E4.7 | Benchmark detection latency | S | Measure and log inference time |
 
 **Technical Notes:**
 - Target <15ms per frame on AGX Orin per [benchmarks](https://wiki.seeedstudio.com/YOLOv8-TRT-Jetson/)
-- Use DeepStream's nvinfer for batched inference
+- Detector subscribes to `frame.new`, emits `detection.complete`
 - INT8 calibration with COCO subset
 
 ---
 
-## Epic 4: VLM Integration
+## Epic 5: VLM Integration
 
-**Goal:** Scene descriptions and Q&A using VILA via NanoLLM.
+**Goal:** Generate scene descriptions, emit summaries.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E4.1 | Load VILA-7B AWQ model via NanoLLM | M | Model loads, responds to test prompt |
-| E4.2 | Create VLM wrapper with describe/query methods | M | `vlm.describe(frame)`, `vlm.query(frame, question)` |
-| E4.3 | Implement periodic summary generation | M | Summary updates every N seconds |
-| E4.4 | Add streaming response support | M | Tokens stream to client as generated |
-| E4.5 | Configure max tokens and temperature | S | Configurable via YAML |
-| E4.6 | Handle VLM errors gracefully | S | Timeout, OOM don't crash app |
+| E5.1 | Load VILA-7B AWQ model via NanoLLM | M | Model loads, responds to test prompt |
+| E5.2 | Create VLM wrapper with describe/query methods | M | `vlm.describe(frame)`, `vlm.query(frame, question)` |
+| E5.3 | Create Sampler that emits `sample.ready` periodically | M | Samples frames every N seconds |
+| E5.4 | Create Summarizer that listens to `sample.ready` | M | Runs VLM on sampled frames |
+| E5.5 | Emit `summary.new` with description text | S | Event includes text, timestamp |
+| E5.6 | Add streaming response support | M | Tokens stream to client as generated |
+| E5.7 | Configure max tokens and temperature | S | Configurable via YAML |
+| E5.8 | Handle VLM errors, emit `error.occurred` | S | Timeout, OOM don't crash app |
 
 **Technical Notes:**
 - Use NanoLLM's ChatHistory for conversation management per [NanoLLM docs](https://github.com/dusty-nv/NanoLLM)
+- Sampler decouples frame rate from VLM rate (VLM is slower)
 - VILA-7B AWQ fits in ~8GB, leaves headroom for detection
-- First load compiles TensorRT engine (~60s)
 
 ---
 
-## Epic 5: Memory & State Management
+## Epic 6: Memory & State Management
 
-**Goal:** Track recent activity for temporal queries.
+**Goal:** Track recent activity by listening to events.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E5.1 | Implement CurrentState dataclass | S | Holds frame, detections, timestamp |
-| E5.2 | Implement RecentMemory with rolling window | M | Stores last N summaries, configurable window |
-| E5.3 | Add detection history tracking | M | Query detections from last N seconds |
-| E5.4 | Implement `get_recent()` method | S | Returns summaries in time range |
-| E5.5 | Add memory size limits to prevent OOM | S | Configurable max items, auto-evict oldest |
+| E6.1 | Implement CurrentState that updates on events | M | Subscribes to relevant events, maintains state |
+| E6.2 | Implement RecentMemory with rolling window | M | Stores last N summaries, configurable window |
+| E6.3 | Listen to `detection.complete` for history | S | Detection history queryable |
+| E6.4 | Listen to `summary.new` for summary history | S | Summary history queryable |
+| E6.5 | Implement `get_recent()` method | S | Returns summaries in time range |
+| E6.6 | Add memory size limits to prevent OOM | S | Configurable max items, auto-evict oldest |
 
 **Technical Notes:**
+- Memory components are pure listeners - no direct coupling
 - Use Python deque with maxlen for auto-eviction
 - No database for MVP - in-memory only
-- Consider Redis for future persistence
 
 ---
 
-## Epic 6: Agent & Tools
+## Epic 7: Agent & Tools
 
-**Goal:** Natural language interface with tool-based responses.
+**Goal:** Natural language interface that responds to query events.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E6.1 | Create Agent class with tool registry | M | Agent loads, tools registered |
-| E6.2 | Implement intent classification | M | Maps user query to tool |
-| E6.3 | Implement `describe_now` tool | S | Returns VLM description of current frame |
-| E6.4 | Implement `detect_objects` tool | S | Returns formatted detection list |
-| E6.5 | Implement `count_objects` tool | S | Returns count of specified class |
-| E6.6 | Implement `check_condition` tool | M | VLM answers yes/no with explanation |
-| E6.7 | Implement `recent_summary` tool | M | Synthesizes recent activity |
-| E6.8 | Implement `set_alert` tool | M | Registers condition to watch |
-| E6.9 | Implement `clear_alert` tool | S | Removes alert by ID |
-| E6.10 | Create tool response formatter | S | Consistent response structure |
+| E7.1 | Create Agent class that listens to `query.received` | M | Agent handles incoming queries |
+| E7.2 | Implement tool registry pattern | M | Tools register by name |
+| E7.3 | Implement intent classification | M | Maps user query to tool |
+| E7.4 | Implement `describe_now` tool | S | Returns VLM description of current frame |
+| E7.5 | Implement `detect_objects` tool | S | Returns formatted detection list |
+| E7.6 | Implement `count_objects` tool | S | Returns count of specified class |
+| E7.7 | Implement `check_condition` tool | M | VLM answers yes/no with explanation |
+| E7.8 | Implement `recent_summary` tool | M | Synthesizes recent activity from memory |
+| E7.9 | Implement `set_alert` tool | M | Registers condition, emits confirmation |
+| E7.10 | Implement `clear_alert` tool | S | Removes alert by ID |
+| E7.11 | Emit `response.ready` with answer | S | Event includes answer, citations, request_id |
+| E7.12 | Create tool response formatter | S | Consistent response structure |
 
 **Technical Notes:**
+- Agent subscribes to `query.received`, emits `response.ready`
+- Tools access CurrentState and RecentMemory (injected)
 - Consider NanoLLM's `bot_function` decorator for tool registration
-- Intent classification can start simple (keyword matching), evolve to LLM-based
-- Use structured output for tool dispatch
 
 ---
 
-## Epic 7: Alert System
+## Epic 8: Alert System
 
-**Goal:** Watch for conditions and notify when met.
+**Goal:** Watch for conditions by listening to detection events.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E7.1 | Create Alert dataclass | S | Stores condition, timestamps, trigger count |
-| E7.2 | Implement AlertManager | M | Add, remove, list alerts |
-| E7.3 | Create alert evaluation loop | M | Checks conditions periodically |
-| E7.4 | Integrate VLM for condition checking | M | Uses `check_condition` for evaluation |
-| E7.5 | Add cooldown to prevent spam | S | Configurable cooldown period |
-| E7.6 | Emit alert events via WebSocket | M | Client receives alert notifications |
+| E8.1 | Create Alert dataclass | S | Stores condition, timestamps, trigger count |
+| E8.2 | Implement AlertManager | M | Add, remove, list alerts |
+| E8.3 | Create AlertChecker that listens to `detection.complete` | M | Evaluates conditions on each detection |
+| E8.4 | Integrate VLM for condition checking | M | Uses `check_condition` for complex conditions |
+| E8.5 | Emit `alert.triggered` when condition met | S | Event includes alert_id, condition, evidence |
+| E8.6 | Add cooldown to prevent spam | S | Configurable cooldown period |
 
 **Technical Notes:**
-- Async evaluation loop with configurable interval
-- Simple string conditions for MVP (VLM interprets)
-- Future: structured condition DSL
+- AlertChecker subscribes to `detection.complete`
+- Simple conditions (object class) checked directly
+- Complex conditions ("person not wearing helmet") use VLM
 
 ---
 
-## Epic 8: REST API
+## Epic 9: REST API
 
-**Goal:** HTTP endpoints for control and queries.
+**Goal:** HTTP endpoints that emit/listen to events.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E8.1 | Set up FastAPI application structure | S | App starts, serves /health |
-| E8.2 | Implement `/health` endpoint | S | Returns status, GPU metrics |
-| E8.3 | Implement `/status` endpoint | S | Returns connection state, stats |
-| E8.4 | Implement `/source/connect` endpoint | M | Connects to RTSP/USB source |
-| E8.5 | Implement `/source/disconnect` endpoint | S | Cleanly disconnects source |
-| E8.6 | Implement `/query` endpoint | M | Sends query to agent, returns answer |
-| E8.7 | Implement `/alerts` CRUD endpoints | M | GET, POST, DELETE for alerts |
-| E8.8 | Add request validation with Pydantic | S | Invalid requests return 400 |
-| E8.9 | Add structured error responses | S | Consistent error format |
+| E9.1 | Set up FastAPI application structure | S | App starts, serves /health |
+| E9.2 | Implement `/health` endpoint | S | Returns status, GPU metrics |
+| E9.3 | Implement `/status` endpoint (listen to state events) | S | Returns connection state, stats |
+| E9.4 | Implement `/source/connect` endpoint | M | Triggers pipeline connect |
+| E9.5 | Implement `/source/disconnect` endpoint | S | Triggers pipeline disconnect |
+| E9.6 | Implement `/query` endpoint (emit `query.received`) | M | Emits event, waits for `response.ready` |
+| E9.7 | Implement `/alerts` CRUD endpoints | M | GET, POST, DELETE for alerts |
+| E9.8 | Add request validation with Pydantic | S | Invalid requests return 400 |
+| E9.9 | Add structured error responses | S | Consistent error format |
 
 **Technical Notes:**
+- `/query` emits `query.received` and awaits `response.ready` with matching request_id
 - Use FastAPI's async support
 - Pydantic models for request/response
-- OpenAPI docs auto-generated
 
 ---
 
-## Epic 9: WebSocket & Streaming
+## Epic 10: WebSocket & Streaming
 
-**Goal:** Real-time updates to client.
+**Goal:** Stream events to client in real-time.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E9.1 | Set up WebSocket endpoint `/ws/live` | M | Client connects, stays connected |
-| E9.2 | Stream JPEG frames to client | M | Client receives frame updates |
-| E9.3 | Stream detection updates | S | Client receives detection JSON |
-| E9.4 | Stream summary updates | S | Client receives new summaries |
-| E9.5 | Handle query via WebSocket | M | Query/response over same connection |
-| E9.6 | Stream alert notifications | S | Client receives triggered alerts |
-| E9.7 | Handle client disconnect gracefully | S | No errors on disconnect |
-| E9.8 | Add frame rate limiting | S | Configurable max FPS to client |
+| E10.1 | Set up WebSocket endpoint `/ws/live` | M | Client connects, stays connected |
+| E10.2 | Create WebSocket handler that subscribes to events | M | Forwards events to connected clients |
+| E10.3 | Forward `frame.new` as JPEG to client | M | Client receives frame updates |
+| E10.4 | Forward `detection.complete` to client | S | Client receives detection JSON |
+| E10.5 | Forward `summary.new` to client | S | Client receives new summaries |
+| E10.6 | Forward `alert.triggered` to client | S | Client receives triggered alerts |
+| E10.7 | Handle `query.received` from client via WebSocket | M | Query/response over same connection |
+| E10.8 | Handle client disconnect gracefully | S | Unsubscribe handlers, no errors |
+| E10.9 | Add frame rate limiting | S | Configurable max FPS to client |
 
 **Technical Notes:**
-- Use FastAPI's WebSocket support
-- JPEG encode frames for transmission (balance quality/size)
-- Consider binary protocol for frames, JSON for metadata
+- WebSocket handler is just another event listener
+- Each client connection subscribes to relevant events
+- Unsubscribe all handlers on disconnect
 
 ---
 
-## Epic 10: Frontend UI
+## Epic 11: Frontend UI
 
-**Goal:** Single-page interface for live view and interaction.
+**Goal:** Single-page interface that displays events.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E10.1 | Set up React + Vite project | S | Dev server runs, builds production |
-| E10.2 | Create WebSocket connection hook | M | Connects, reconnects on failure |
-| E10.3 | Implement VideoFeed component | M | Displays live frames from WebSocket |
-| E10.4 | Implement DetectionOverlay component | M | Draws boxes on video feed |
-| E10.5 | Implement SummaryPanel component | S | Shows current VLM summary |
-| E10.6 | Implement ChatInterface component | M | Input box, message history |
-| E10.7 | Implement AlertPanel component | M | Shows active alerts, allows delete |
-| E10.8 | Add connection status indicator | S | Shows connected/disconnected state |
-| E10.9 | Add source configuration modal | M | Enter RTSP URL or select USB |
-| E10.10 | Style with Tailwind CSS | M | Clean, functional appearance |
+| E11.1 | Set up React + Vite project | S | Dev server runs, builds production |
+| E11.2 | Create WebSocket connection hook | M | Connects, reconnects on failure |
+| E11.3 | Create event dispatcher in frontend | M | Routes incoming events to components |
+| E11.4 | Implement VideoFeed component | M | Displays frames from `frame.new` events |
+| E11.5 | Implement DetectionOverlay component | M | Draws boxes from `detection.complete` |
+| E11.6 | Implement SummaryPanel component | S | Shows text from `summary.new` |
+| E11.7 | Implement ChatInterface component | M | Sends queries, displays `response.ready` |
+| E11.8 | Implement AlertPanel component | M | Shows `alert.triggered`, allows delete |
+| E11.9 | Add connection status indicator | S | Shows connected/disconnected from events |
+| E11.10 | Add source configuration modal | M | Enter RTSP URL or select USB |
+| E11.11 | Style with Tailwind CSS | M | Clean, functional appearance |
 
 **Technical Notes:**
-- Video.js or raw canvas for frame display
-- Tailwind for rapid styling
-- Keep it simple - function over form for MVP
+- Frontend mirrors event-driven pattern
+- Each component subscribes to relevant event types
+- Centralized event dispatcher routes WebSocket messages
 
 ---
 
-## Epic 11: Configuration & Deployment
+## Epic 12: Configuration & Deployment
 
 **Goal:** Production-ready container deployment.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E11.1 | Create production Dockerfile | M | Builds, includes all dependencies |
-| E11.2 | Create production docker-compose.yml | S | Single command deployment |
-| E11.3 | Implement YAML configuration loading | S | Config from file + env overrides |
-| E11.4 | Add structured JSON logging | S | Logs parseable, include correlation IDs |
-| E11.5 | Implement graceful shutdown | M | SIGTERM handled, resources cleaned |
-| E11.6 | Create Jetson setup script | M | Provisions new device |
-| E11.7 | Add health check to Dockerfile | S | Docker knows when app is healthy |
-| E11.8 | Document deployment process | S | README covers production setup |
+| E12.1 | Create production Dockerfile | M | Builds, includes all dependencies |
+| E12.2 | Create production docker-compose.yml | S | Single command deployment |
+| E12.3 | Implement YAML configuration loading | S | Config from file + env overrides |
+| E12.4 | Add structured JSON logging with events | S | Logs include event types, correlation IDs |
+| E12.5 | Implement graceful shutdown (stop EventBus) | M | SIGTERM handled, bus stopped, resources cleaned |
+| E12.6 | Create Jetson setup script | M | Provisions new device |
+| E12.7 | Add health check to Dockerfile | S | Docker knows when app is healthy |
+| E12.8 | Document deployment process | S | README covers production setup |
 
 **Technical Notes:**
+- Graceful shutdown must stop EventBus and let handlers complete
 - Multi-stage build: frontend → backend
 - Model cache in named volume
-- NVIDIA runtime required
 
 ---
 
-## Epic 12: Testing & Quality
+## Epic 13: Testing & Quality
 
 **Goal:** Confidence in correctness and stability.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E12.1 | Set up pytest infrastructure | S | Tests run, report results |
-| E12.2 | Write unit tests for Agent | M | Tool dispatch tested |
-| E12.3 | Write unit tests for tools | M | Each tool has tests |
-| E12.4 | Write integration test for API | M | Endpoints return expected responses |
-| E12.5 | Create mock video source for testing | M | Tests run without real camera |
-| E12.6 | Add type hints throughout | M | mypy passes |
-| E12.7 | Add ruff linting | S | Code style consistent |
-| E12.8 | Create stability test (1hr run) | M | No crashes, no memory leak |
+| E13.1 | Set up pytest infrastructure | S | Tests run, report results |
+| E13.2 | Write unit tests for EventBus | M | Emit, subscribe, unsubscribe tested |
+| E13.3 | Write unit tests for Agent | M | Tool dispatch tested via events |
+| E13.4 | Write unit tests for each tool | M | Each tool has tests |
+| E13.5 | Write integration test for event flows | M | End-to-end event chains tested |
+| E13.6 | Create mock event source for testing | M | Tests run without real camera |
+| E13.7 | Add type hints throughout | M | mypy passes |
+| E13.8 | Add ruff linting | S | Code style consistent |
+| E13.9 | Create stability test (1hr run) | M | No crashes, no memory leak |
+
+**Technical Notes:**
+- Event-driven architecture makes testing easier
+- Mock events instead of mocking dependencies
+- Event replay utility (E2.6) useful for integration tests
 
 ---
 
@@ -272,56 +381,60 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 | Epic | Stories | S | M | L |
 |------|---------|---|---|---|
 | 1. Dev Environment | 6 | 6 | 0 | 0 |
-| 2. Video Pipeline | 6 | 2 | 4 | 0 |
-| 3. Detection | 6 | 4 | 2 | 0 |
-| 4. VLM | 6 | 2 | 4 | 0 |
-| 5. Memory/State | 5 | 3 | 2 | 0 |
-| 6. Agent & Tools | 10 | 5 | 5 | 0 |
-| 7. Alerts | 6 | 2 | 4 | 0 |
-| 8. REST API | 9 | 5 | 4 | 0 |
-| 9. WebSocket | 8 | 4 | 4 | 0 |
-| 10. Frontend | 10 | 2 | 8 | 0 |
-| 11. Deployment | 8 | 4 | 4 | 0 |
-| 12. Testing | 8 | 2 | 6 | 0 |
-| **Total** | **88** | **41** | **47** | **0** |
+| 2. Event Bus | 7 | 4 | 3 | 0 |
+| 3. Video Pipeline | 8 | 4 | 4 | 0 |
+| 4. Detection | 7 | 4 | 3 | 0 |
+| 5. VLM | 8 | 3 | 5 | 0 |
+| 6. Memory/State | 6 | 4 | 2 | 0 |
+| 7. Agent & Tools | 12 | 5 | 7 | 0 |
+| 8. Alerts | 6 | 3 | 3 | 0 |
+| 9. REST API | 9 | 5 | 4 | 0 |
+| 10. WebSocket | 9 | 4 | 5 | 0 |
+| 11. Frontend | 11 | 3 | 8 | 0 |
+| 12. Deployment | 8 | 4 | 4 | 0 |
+| 13. Testing | 9 | 3 | 6 | 0 |
+| **Total** | **106** | **52** | **54** | **0** |
 
 ---
 
 ## Recommended Sprint Structure
 
-### Sprint 1: Foundation
+### Sprint 1: Foundation & Event Bus
 - Epic 1 (Dev Environment) - All
-- Epic 2 (Video Pipeline) - E2.1, E2.2, E2.3, E2.4
-- Epic 3 (Detection) - E3.1, E3.2
+- Epic 2 (Event Bus) - All
 
-**Demo:** Live video with detection overlays in terminal/debug output.
+**Demo:** EventBus running, events emitting and logging in test harness.
 
-### Sprint 2: Intelligence
-- Epic 2 (Video Pipeline) - E2.5, E2.6
-- Epic 3 (Detection) - E3.3, E3.4, E3.5, E3.6
-- Epic 4 (VLM) - All
-- Epic 5 (Memory) - All
+### Sprint 2: Video & Detection Pipeline
+- Epic 3 (Video Pipeline) - All
+- Epic 4 (Detection) - All
 
-**Demo:** Video with detections + periodic VLM summaries printed.
+**Demo:** Live video with `frame.new` and `detection.complete` events printing.
 
-### Sprint 3: Interaction
-- Epic 6 (Agent) - All
-- Epic 7 (Alerts) - All
-- Epic 8 (REST API) - All
+### Sprint 3: Intelligence
+- Epic 5 (VLM) - All
+- Epic 6 (Memory) - All
 
-**Demo:** Query via curl, get responses. Set alerts via API.
+**Demo:** `summary.new` events printing, memory queryable.
 
-### Sprint 4: Interface
-- Epic 9 (WebSocket) - All
-- Epic 10 (Frontend) - All
+### Sprint 4: Interaction
+- Epic 7 (Agent) - All
+- Epic 8 (Alerts) - All
+- Epic 9 (REST API) - All
 
-**Demo:** Full UI with live video, chat, alerts.
+**Demo:** Query via curl (`query.received` → `response.ready`). Alerts trigger.
 
-### Sprint 5: Production
-- Epic 11 (Deployment) - All
-- Epic 12 (Testing) - All
+### Sprint 5: Interface
+- Epic 10 (WebSocket) - All
+- Epic 11 (Frontend) - All
 
-**Demo:** Deploy to fresh Jetson, run stability test.
+**Demo:** Full UI with live video, chat, alerts - all event-driven.
+
+### Sprint 6: Production
+- Epic 12 (Deployment) - All
+- Epic 13 (Testing) - All
+
+**Demo:** Deploy to fresh Jetson, run stability test, verify event logging.
 
 ---
 
@@ -330,10 +443,47 @@ A focused backlog for building the Real-Time Video Intelligence MVP on NVIDIA Je
 A story is complete when:
 
 1. **Code** - Implementation complete and merged
-2. **Tests** - Unit/integration tests pass
-3. **Docs** - Code documented, README updated if needed
-4. **Review** - Code reviewed (or self-reviewed for solo dev)
-5. **Works on Jetson** - Tested on actual hardware
+2. **Events** - Emits/listens to correct events per spec
+3. **Tests** - Unit/integration tests pass
+4. **Docs** - Code documented, README updated if needed
+5. **Review** - Code reviewed (or self-reviewed for solo dev)
+6. **Works on Jetson** - Tested on actual hardware
+
+---
+
+## Adding Custom Hooks
+
+The event-driven architecture makes extension easy:
+
+```python
+# my_custom_hook.py
+from src.core.events import bus, Event
+
+class ObjectCounter:
+    """Example: Count objects over time."""
+
+    def __init__(self):
+        # Just subscribe to the events you care about
+        bus.on("detection.complete", self.on_detection)
+        self.counts = {}
+
+    async def on_detection(self, event: Event):
+        for det in event.data["detections"]:
+            cls = det.class_name
+            self.counts[cls] = self.counts.get(cls, 0) + 1
+
+        # Emit your own events
+        if sum(self.counts.values()) % 100 == 0:
+            await bus.emit(Event(
+                type="stats.object_counts",
+                data={"counts": self.counts}
+            ))
+
+# To activate: just instantiate
+counter = ObjectCounter()
+```
+
+No changes to core code required.
 
 ---
 
@@ -341,26 +491,78 @@ A story is complete when:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| DeepStream + NanoLLM integration issues | Medium | High | Test integration early (Sprint 1) |
+| Event bus becomes bottleneck | Low | High | Profile, add backpressure if needed |
+| DeepStream + async event integration | Medium | High | Test integration early (Sprint 1-2) |
+| Event ordering issues | Low | Medium | Add sequence numbers if needed |
 | VLM latency too high | Low | Medium | VILA-3B fallback available |
 | Memory pressure with all models loaded | Medium | High | Profile memory, tune batch sizes |
-| WebSocket frame streaming bottleneck | Medium | Medium | Frame rate limiting, JPEG quality tuning |
-| TensorRT engine compilation slow first run | Certain | Low | Pre-compile in container build |
+| Handler exceptions break event flow | Medium | Medium | Try/catch in bus, log errors |
 
 ---
 
 ## Dependencies
 
 ```
-Sprint 1 ──► Sprint 2 ──► Sprint 3 ──► Sprint 4 ──► Sprint 5
-   │            │            │            │
-   │            │            │            └── Needs API working
-   │            │            └── Needs VLM + Memory working
-   │            └── Needs Video Pipeline working
-   └── Needs Dev Environment working
+Sprint 1 ──► Sprint 2 ──► Sprint 3 ──► Sprint 4 ──► Sprint 5 ──► Sprint 6
+   │            │            │            │            │
+   │            │            │            │            └── Needs WebSocket
+   │            │            │            └── Needs VLM + Memory
+   │            │            └── Needs Detection events
+   │            └── Needs EventBus working
+   └── Needs Dev Environment
 ```
 
-Each sprint builds on previous. Parallel work possible within sprints.
+Event Bus (Epic 2) is foundational - all other components depend on it.
+
+---
+
+## Project Structure (Updated)
+
+```
+edge-vision/
+├── src/
+│   ├── main.py                 # App entry, starts EventBus
+│   ├── config.py
+│   │
+│   ├── core/
+│   │   ├── events.py           # EventBus, Event dataclass
+│   │   ├── event_types.py      # Typed event definitions
+│   │   └── logging.py          # Event-aware logging
+│   │
+│   ├── pipeline/
+│   │   ├── video.py            # Emits: frame.new, source.*
+│   │   ├── detector.py         # Listens: frame.new → Emits: detection.complete
+│   │   ├── sampler.py          # Listens: frame.new → Emits: sample.ready
+│   │   └── vlm.py              # Listens: sample.ready → Emits: summary.new
+│   │
+│   ├── agent/
+│   │   ├── agent.py            # Listens: query.received → Emits: response.ready
+│   │   ├── tools.py
+│   │   └── intents.py
+│   │
+│   ├── state/
+│   │   ├── current.py          # Listens: detection.complete, summary.new
+│   │   ├── memory.py           # Listens: detection.complete, summary.new
+│   │   └── alerts.py           # Listens: detection.complete → Emits: alert.triggered
+│   │
+│   ├── api/
+│   │   ├── routes.py           # Emits: query.received
+│   │   └── websocket.py        # Listens: *, forwards to clients
+│   │
+│   └── hooks/                  # Custom extensions
+│       └── example_counter.py
+│
+├── frontend/
+│   └── src/
+│       ├── events/             # Frontend event dispatcher
+│       └── components/         # Event-driven components
+│
+└── tests/
+    ├── test_events.py          # EventBus tests
+    ├── test_integration.py     # Event flow tests
+    └── fixtures/
+        └── mock_events.py      # Mock event generators
+```
 
 ---
 
@@ -377,4 +579,4 @@ Each sprint builds on previous. Parallel work possible within sprints.
 
 ---
 
-*AGILE Development Plan - January 2026*
+*AGILE Development Plan (Event-Driven) - January 2026*
