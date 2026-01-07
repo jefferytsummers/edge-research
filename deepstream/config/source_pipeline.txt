@@ -1,0 +1,69 @@
+# =============================================================================
+# DeepStream Pipeline Configuration - RTSP Source
+# =============================================================================
+# This config handles RTSP input, batched inference, and detection output.
+# Used by the deepstream_app.py Python wrapper.
+# =============================================================================
+
+[application]
+enable-perf-measurement=1
+perf-measurement-interval-sec=5
+
+[tiled-display]
+enable=0
+
+[source0]
+enable=1
+type=4
+# RTSP URI - will be overridden by environment variable RTSP_URI
+uri=rtsp://localhost:8554/webcam
+num-sources=1
+gpu-id=0
+cudadec-memtype=0
+# Reconnection settings
+latency=100
+drop-frame-interval=0
+rtsp-reconnect-interval-sec=5
+
+[streammux]
+gpu-id=0
+batch-size=1
+batched-push-timeout=40000
+width=1280
+height=720
+enable-padding=0
+nvbuf-memory-type=0
+live-source=1
+
+[primary-gie]
+enable=1
+gpu-id=0
+gie-unique-id=1
+nvbuf-memory-type=0
+config-file=nvinfer_config.txt
+
+[tracker]
+enable=0
+
+[sink0]
+enable=1
+type=1
+sync=0
+source-id=0
+gpu-id=0
+qos=0
+
+[osd]
+enable=1
+gpu-id=0
+border-width=2
+text-size=12
+text-color=1;1;1;1
+text-bg-color=0.3;0.3;0.3;1
+font=Arial
+show-clock=0
+clock-x-offset=800
+clock-y-offset=820
+clock-text-size=12
+clock-color=1;0;0;0
+nvbuf-memory-type=0

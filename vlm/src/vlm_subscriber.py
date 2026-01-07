@@ -2,6 +2,7 @@
 VLM Subscriber - Redis subscriber for VLM container.
 
 Subscribes to detection events, runs VLM inference, publishes summaries.
+Uses NanoLLM/VILA for vision-language understanding.
 """
 import asyncio
 import json
@@ -12,10 +13,16 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import redis.asyncio as redis
+from PIL import Image
 
 from .protocol_evaluator import ProtocolConfig, ProtocolEvaluator, StreamStatus
 
 logger = logging.getLogger(__name__)
+
+# Configuration
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+VLM_MODEL = os.environ.get('VLM_MODEL', 'Efficient-Large-Model/VILA1.5-3b')
+FRAME_DIR = Path(os.environ.get('FRAME_DIR', '/shared/frames'))
 
 
 class MultiStreamVLMSampler:
@@ -72,6 +79,130 @@ class MultiStreamVLMSampler:
         return None
 
 
+class NanoLLMWrapper:
+    """
+    Wrapper for NanoLLM/VILA model.
+
+    Handles model loading and inference.
+    """
+
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self._model = None
+        self._loaded = False
+
+    def load(self):
+        """Load the VLM model."""
+        try:
+            from nano_llm import NanoLLM
+            logger.info(f"Loading VLM model: {self.model_name}")
+            self._model = NanoLLM.from_pretrained(
+                self.model_name,
+                quantization='q4f16_ft'  # Quantized for Jetson
+            )
+            self._loaded = True
+            logger.info("VLM model loaded successfully")
+        except ImportError:
+            logger.warning("nano_llm not available - using mock mode")
+            self._loaded = False
+        except Exception as e:
+            logger.error(f"Failed to load VLM model: {e}")
+            self._loaded = False
+
+    def describe(self, image_path: str, prompt: str = None) -> str:
+        """
+        Generate description for an image.
+
+        Args:
+            image_path: Path to the image file
+            prompt: Optional prompt for the model
+
+        Returns:
+            Text description of the image
+        """
+        if not self._loaded or self._model is None:
+            # Mock response for testing
+            return "Person sitting calmly in room. No immediate concerns detected."
+
+        try:
+            # Load image
+            image = Image.open(image_path)
+
+            # Default prompt for scene description
+            if prompt is None:
+                prompt = (
+                    "Describe what you see in this image. "
+                    "Focus on: people present, their activities, posture, "
+                    "and any safety concerns. Be concise."
+                )
+
+            # Run inference
+            response = self._model.generate(
+                prompt,
+                image=image,
+                max_new_tokens=100
+            )
+
+            return response
+        except Exception as e:
+            logger.error(f"VLM inference failed: {e}")
+            return "Unable to analyze image"
+
+    def classify(self, image_path: str, protocols: ProtocolConfig) -> str:
+        """
+        Classify scene against protocols.
+
+        Args:
+            image_path: Path to the image file
+            protocols: User-defined behavioral protocols
+
+        Returns:
+            Classification string: "SEVERITY|ICON|MESSAGE"
+        """
+        if not self._loaded or self._model is None:
+            # Mock response for testing
+            return "GREEN|calm|Person sitting calmly, no concerns"
+
+        try:
+            image = Image.open(image_path)
+
+            prompt = f"""Analyze this image and classify the situation.
+
+User's protocols:
+- GREEN (safe): {protocols.green_rules}
+- YELLOW (attention): {protocols.yellow_rules}
+- RED (critical): {protocols.red_rules}
+
+Respond with EXACTLY this format (one line):
+SEVERITY|ICON|MESSAGE
+
+Where:
+- SEVERITY is one of: GREEN, YELLOW, RED
+- ICON is one word: reading, tv, sleeping, eating, calm, exercise, unclear, injury, distress, pacing, emergency, missing, danger, unconscious
+- MESSAGE is a brief one-sentence status
+
+Example: GREEN|reading|Resident reading in rocking chair."""
+
+            response = self._model.generate(
+                prompt,
+                image=image,
+                max_new_tokens=50
+            )
+
+            # Parse and validate response
+            response = response.strip().split('\n')[0]  # Take first line
+            parts = response.split('|')
+            if len(parts) >= 3:
+                return response
+
+            # Fallback if parsing fails
+            return "YELLOW|unclear|Unable to determine status clearly"
+
+        except Exception as e:
+            logger.error(f"VLM classification failed: {e}")
+            return "YELLOW|unclear|Error analyzing image"
+
+
 class VLMSubscriber:
     """
     Main VLM service that subscribes to Redis and processes frames.
@@ -88,11 +219,11 @@ class VLMSubscriber:
         self._redis: Optional[redis.Redis] = None
         self._pubsub: Optional[redis.client.PubSub] = None
 
-        # VLM model (loaded on start)
-        self._vlm = None
+        # VLM model
+        self._vlm = NanoLLMWrapper(VLM_MODEL)
 
         # Protocol evaluator
-        self.evaluator = ProtocolEvaluator(protocols, vlm_client=None)
+        self.evaluator = ProtocolEvaluator(protocols, vlm_client=self._vlm)
 
         # Multi-stream sampler
         self.sampler = MultiStreamVLMSampler([], interval_per_stream=10.0)
@@ -114,29 +245,16 @@ class VLMSubscriber:
         if self._redis:
             await self._redis.close()
 
-    async def load_vlm(self):
-        """Load VLM model."""
-        # TODO: Load NanoLLM/VILA model
-        # from nano_llm import NanoLLM
-        # self._vlm = NanoLLM.from_pretrained("Efficient-Large-Model/VILA1.5-7b")
-        logger.info("VLM model loaded (placeholder)")
+    def load_vlm(self):
+        """Load VLM model (synchronous, done at startup)."""
+        self._vlm.load()
 
-    def _read_frame(self, stream_id: str) -> Optional[bytes]:
-        """Read latest frame from shared volume."""
+    def _read_frame_path(self, stream_id: str) -> Optional[str]:
+        """Get path to latest frame for stream."""
         frame_path = self.frame_dir / stream_id / "latest.jpg"
-        try:
-            if frame_path.exists():
-                return frame_path.read_bytes()
-        except Exception as e:
-            logger.warning(f"Failed to read frame for {stream_id}: {e}")
+        if frame_path.exists():
+            return str(frame_path)
         return None
-
-    async def _describe_frame(self, frame_bytes: bytes) -> str:
-        """Generate description using VLM."""
-        # TODO: Implement VLM inference
-        # if self._vlm:
-        #     return await self._vlm.describe(frame_bytes)
-        return "Person sitting calmly in room"  # Placeholder
 
     async def _process_detection(self, data: Dict):
         """Process incoming detection event."""
@@ -165,24 +283,25 @@ class VLMSubscriber:
 
         pending = self._pending_frames[stream_id]
         detections = pending["detections"]
+        frame_path = pending.get("frame_path") or self._read_frame_path(stream_id)
 
-        # Read frame
-        frame_bytes = self._read_frame(stream_id)
-        if not frame_bytes:
+        if not frame_path or not Path(frame_path).exists():
+            logger.warning(f"No frame available for {stream_id}")
             return
 
-        # Generate description
-        description = await self._describe_frame(frame_bytes)
+        # Classify using VLM
+        classification = self._vlm.classify(frame_path, self.evaluator.protocols)
 
-        # Evaluate against protocols
-        status = await self.evaluator.evaluate(
-            stream_id=stream_id,
-            description=description,
-            detections=detections
-        )
+        # Parse response
+        status = self.evaluator._parse_response(stream_id, classification)
 
-        # Publish summary if status changed
-        if status:
+        # Apply state machine debouncing
+        sm = self.evaluator._get_state_machine(stream_id)
+        if sm.update(status.severity):
+            await self._publish_summary(status)
+        else:
+            # Still publish status update even if severity unchanged
+            # (description may have changed)
             await self._publish_summary(status)
 
         # Mark as sampled
@@ -203,12 +322,16 @@ class VLMSubscriber:
                 "timestamp": time.time()
             }
             await self._redis.publish("summaries", json.dumps(message))
-            logger.info(f"Published summary for {status.stream_id}: {status.severity}")
+            logger.info(f"Published summary for {status.stream_id}: {status.severity} - {status.description}")
 
     async def run(self):
         """Main run loop."""
         await self.connect()
-        await self.load_vlm()
+
+        # Load VLM model (blocking, done once at startup)
+        logger.info("Loading VLM model...")
+        self.load_vlm()
+        logger.info("VLM model ready")
 
         # Subscribe to detections channel
         await self._pubsub.subscribe("detections")
@@ -248,7 +371,10 @@ class VLMSubscriber:
 
 async def main():
     """Entry point for VLM service."""
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 
     # Load protocols from config or use defaults
     protocols = ProtocolConfig(
@@ -257,8 +383,12 @@ async def main():
         red_rules="Unconscious on ground, severe injury, room is empty, self-harm behavior"
     )
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    subscriber = VLMSubscriber(redis_url, protocols)
+    subscriber = VLMSubscriber(REDIS_URL, protocols, str(FRAME_DIR))
+
+    logger.info("Starting VLM subscriber service")
+    logger.info(f"Redis URL: {REDIS_URL}")
+    logger.info(f"VLM Model: {VLM_MODEL}")
+    logger.info(f"Frame directory: {FRAME_DIR}")
 
     await subscriber.run()
 

@@ -1,0 +1,49 @@
+# =============================================================================
+# nvinfer Configuration - Person Detection
+# =============================================================================
+# Uses NVIDIA PeopleNet for person/face/bag detection.
+# Model is downloaded automatically on first run.
+# =============================================================================
+
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+# PeopleNet model from NGC
+# Will auto-download on first run if using TAO integration
+tlt-model-key=tlt_encode
+tlt-encoded-model=/opt/nvidia/deepstream/deepstream/samples/models/tao_pretrained_models/peoplenet/resnet34_peoplenet_pruned.etlt
+labelfile-path=labels.txt
+model-engine-file=/opt/nvidia/deepstream/deepstream/samples/models/tao_pretrained_models/peoplenet/resnet34_peoplenet_pruned.etlt_b1_gpu0_fp16.engine
+batch-size=1
+process-mode=1
+model-color-format=0
+network-mode=2
+num-detected-classes=3
+cluster-mode=2
+interval=0
+gie-unique-id=1
+output-blob-names=output_cov/Sigmoid;output_bbox/BiasAdd
+
+[class-attrs-all]
+pre-cluster-threshold=0.4
+topk=20
+nms-iou-threshold=0.5
+
+# Person class - index 0
+[class-attrs-0]
+pre-cluster-threshold=0.4
+roi-top-offset=0
+roi-bottom-offset=0
+detected-min-w=10
+detected-min-h=10
+detected-max-w=1920
+detected-max-h=1080
+
+# Face class - index 1 (optional, lower threshold)
+[class-attrs-1]
+pre-cluster-threshold=0.5
+
+# Bag class - index 2 (optional)
+[class-attrs-2]
+pre-cluster-threshold=0.3

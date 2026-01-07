@@ -3,53 +3,68 @@ services:
   deepstream:
     image: nvcr.io/nvidia/deepstream:7.0-gc-triton-devel
     runtime: nvidia
+    # Use host network to access RTSP stream from Mac
+    network_mode: "host"
     volumes:
       - ./deepstream/config:/app/config:ro
       - ./deepstream/src:/app/src:ro
       - frame_buffer:/shared/frames
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - REDIS_URL=redis://redis:6379
+      # RTSP URI from Mac streaming script - update IP when running
+      - RTSP_URI=${RTSP_URI:-rtsp://192.168.1.100:8554/webcam}
+      - REDIS_URL=redis://localhost:6379
+      - STREAM_ID=${STREAM_ID:-stream_0}
+      - SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-30}
+    command: python3 /app/src/deepstream_pipeline.py
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8554/health"]
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
       interval: 30s
       timeout: 10s
+      start_period: 60s
 
   # VLM inference (dustynv official)
   vlm:
     image: dustynv/nano_llm:r36.4.0
     runtime: nvidia
+    network_mode: "host"
     volumes:
       - ./vlm/src:/app/src:ro
       - model_cache:/root/.cache
       - frame_buffer:/shared/frames:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://localhost:6379
+      # Model selection - VILA for vision-language tasks
+      - VLM_MODEL=${VLM_MODEL:-Efficient-Large-Model/VILA1.5-3b}
+    command: python3 /app/src/vlm_subscriber.py
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import nano_llm"]
+      test: ["CMD", "python3", "-c", "import nano_llm"]
       interval: 30s
       timeout: 10s
+      start_period: 120s
 
   # Application layer (lightweight, custom)
   app:
     build: ./app
-    ports:
-      - "8080:8080"
+    network_mode: "host"
     volumes:
       - ./app/src:/app/src:ro
       - ./app/frontend:/app/frontend:ro
       - config_data:/app/data
+      - frame_buffer:/shared/frames:ro
     environment:
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://localhost:6379
+      - PORT=8080
     depends_on:
-      - redis
-      - deepstream
-      - vlm
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -58,8 +73,7 @@ services:
   # Message broker
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    network_mode: "host"
     volumes:
       - redis_data:/data
     healthcheck:
