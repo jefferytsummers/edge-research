@@ -9,6 +9,7 @@ services:
       - ./deepstream/config:/app/config:ro
       - ./deepstream/src:/app/src:ro
       - frame_buffer:/shared/frames
+      - ds_engine_cache:/opt/nvidia/deepstream/deepstream/samples/models
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       # RTSP URI from Mac streaming script - update IP when running
@@ -85,6 +86,7 @@ volumes:
   model_cache:        # VLM model weights
   config_data:        # SQLite configuration
   redis_data:         # Redis persistence
+  ds_engine_cache:    # TensorRT engine cache (DeepStream)
   frame_buffer:       # Shared frame memory
     driver: local
     driver_opts:

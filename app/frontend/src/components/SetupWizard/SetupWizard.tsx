@@ -3,6 +3,7 @@ import { WizardProgress } from './WizardProgress';
 import { FeedStep } from './FeedStep';
 import { ProtocolStep } from './ProtocolStep';
 import { ReviewStep } from './ReviewStep';
+import { ModelStatusIndicator } from '../Dashboard/ModelStatusIndicator';
 
 interface SetupWizardProps {
   onComplete: () => void;
@@ -26,9 +27,12 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       <header className="border-b border-dark-800 bg-dark-900/95 backdrop-blur sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-xl font-bold text-dark-100">
-              Newport Demo - Setup Wizard
-            </h1>
+            <div className="flex items-center gap-4">
+              <h1 className="text-xl font-bold text-dark-100">
+                Newport Demo - Setup Wizard
+              </h1>
+              <ModelStatusIndicator />
+            </div>
             <span className="text-sm text-dark-400">
               Step {currentStep} of {wizardSteps.length}
             </span>

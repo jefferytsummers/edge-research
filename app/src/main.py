@@ -9,9 +9,12 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, get_settings, configure_logging
 from .event_bus import EventBus
@@ -171,9 +174,9 @@ async def liveness_check():
     return {"status": "alive"}
 
 
-@app.get("/", response_model=ServiceInfo)
-async def root() -> ServiceInfo:
-    """Root endpoint with service information."""
+@app.get("/api/info", response_model=ServiceInfo)
+async def api_info() -> ServiceInfo:
+    """API info endpoint with service information."""
     settings = get_settings()
     return ServiceInfo(
         name=settings.app_name,
@@ -188,8 +191,42 @@ async def get_current_config():
     Get current configuration (non-sensitive values).
 
     For debugging and operational visibility.
+    Includes model_ready flag for frontend to show loading state.
     """
+    import json
     settings = get_settings()
+
+    # Check pipeline status from Redis
+    model_ready = False
+    pipeline_status = "offline"
+    pipeline_message = "Pipeline not running"
+    pipeline_progress = 0
+
+    # Status is considered stale if older than 15 seconds (updates come every 5s)
+    STALE_THRESHOLD_SECONDS = 15
+
+    if event_bus and event_bus.is_connected:
+        try:
+            status_json = await event_bus._redis.get("pipeline:stream_0:status")
+            if status_json:
+                status_data = json.loads(status_json)
+                status_timestamp = status_data.get("timestamp", 0)
+
+                # Check if status is stale
+                age_seconds = time.time() - status_timestamp
+                if age_seconds > STALE_THRESHOLD_SECONDS:
+                    # Status is stale - pipeline likely stopped
+                    pipeline_status = "offline"
+                    pipeline_message = "Pipeline not responding (last seen {:.0f}s ago)".format(age_seconds)
+                else:
+                    # Status is fresh
+                    pipeline_status = status_data.get("status", "unknown")
+                    pipeline_message = status_data.get("message", "")
+                    pipeline_progress = status_data.get("progress", 0) or 0
+                    model_ready = pipeline_status == "running"
+        except Exception:
+            pass
+
     return {
         "app_name": settings.app_name,
         "app_version": settings.app_version,
@@ -198,4 +235,65 @@ async def get_current_config():
         "redis_connected": event_bus.is_connected if event_bus else False,
         "vlm_inference_interval": settings.vlm_inference_interval,
         "vlm_debounce_count": settings.vlm_debounce_count,
+        "model_ready": model_ready,
+        "pipeline_status": pipeline_status,
+        "pipeline_message": pipeline_message,
+        "pipeline_progress": pipeline_progress,
     }
+
+
+@app.get("/api/pipeline/status")
+async def get_pipeline_status(stream_id: str = "stream_0"):
+    """
+    Get current pipeline status for a stream.
+
+    Returns the AI model build status and pipeline state.
+    Used by frontend to show loading indicators.
+    """
+    if not event_bus or not event_bus.is_connected:
+        return {
+            "status": "unknown",
+            "message": "Redis not connected",
+            "stream_id": stream_id,
+            "timestamp": time.time()
+        }
+
+    try:
+        # Get status from Redis key (set by DeepStream)
+        status_json = await event_bus._redis.get(f"pipeline:{stream_id}:status")
+        if status_json:
+            import json
+            return json.loads(status_json)
+        else:
+            return {
+                "status": "offline",
+                "message": "Pipeline not started",
+                "stream_id": stream_id,
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.error(f"Error getting pipeline status: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "stream_id": stream_id,
+            "timestamp": time.time()
+        }
+
+
+# Static file serving for frontend
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+
+if FRONTEND_DIR.exists():
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve the SPA for all non-API routes."""
+        # Check if it's a static file
+        file_path = FRONTEND_DIR / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        # Otherwise serve index.html for SPA routing
+        return FileResponse(FRONTEND_DIR / "index.html")

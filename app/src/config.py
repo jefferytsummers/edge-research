@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         description="Redis connection URL"
     )
     redis_channels: List[str] = Field(
-        default=["detections", "summaries"],
+        default=["detections", "summaries", "pipeline_status"],
         description="Redis channels to subscribe to"
     )
 

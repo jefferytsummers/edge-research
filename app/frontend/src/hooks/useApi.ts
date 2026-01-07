@@ -226,3 +226,28 @@ export function useHealthApi() {
 
   return { checkHealth };
 }
+
+// Pipeline Status types
+export interface PipelineStatus {
+  status: 'initializing' | 'building_engine' | 'running' | 'stopped' | 'error' | 'offline' | 'unknown';
+  message: string;
+  stream_id: string;
+  progress?: number;
+  timestamp: number;
+}
+
+// Pipeline Status API hooks
+export function usePipelineStatusApi() {
+  const getPipelineStatus = useCallback(
+    async (streamId: string = 'stream_0'): Promise<PipelineStatus | null> => {
+      try {
+        return await fetchApi<PipelineStatus>(`/pipeline/status?stream_id=${streamId}`);
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
+
+  return { getPipelineStatus };
+}

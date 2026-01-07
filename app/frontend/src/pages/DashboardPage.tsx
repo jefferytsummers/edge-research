@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { Settings, Bell, Wifi, WifiOff } from 'lucide-react';
 import { Button } from '@/components/common';
-import { FeedGrid, StatusSummary, ActivityLog } from '@/components/Dashboard';
+import { FeedGrid, StatusSummary, ActivityLog, PipelineStatusBanner, ModelStatusIndicator } from '@/components/Dashboard';
 import { useStreamStore, useUnacknowledgedCount } from '@/store';
 import { cn } from '@/lib/utils';
 
@@ -40,6 +40,9 @@ export function DashboardPage() {
                   </>
                 )}
               </div>
+
+              {/* AI Model Status */}
+              <ModelStatusIndicator />
             </div>
 
             <div className="flex items-center gap-3">
@@ -80,6 +83,9 @@ export function DashboardPage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-6">
+        {/* Pipeline Status Banner - shows during AI model building */}
+        <PipelineStatusBanner />
+
         {/* Status Summary (Mobile) */}
         <div className="md:hidden mb-6">
           <StatusSummary />
