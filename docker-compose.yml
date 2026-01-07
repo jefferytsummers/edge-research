@@ -1,7 +1,7 @@
 services:
-  # Video decode + detection (NGC official)
+  # Video decode + detection (NGC official - L4T/Jetson ARM64)
   deepstream:
-    image: nvcr.io/nvidia/deepstream:7.0-gc-triton-devel
+    image: nvcr.io/nvidia/deepstream-l4t:8.0-samples-multiarch
     runtime: nvidia
     # Use host network to access RTSP stream from Mac
     network_mode: "host"

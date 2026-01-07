@@ -223,7 +223,9 @@ def create_pipeline():
 
     # Primary inference (nvinfer)
     pgie = Gst.ElementFactory.make("nvinfer", "pgie")
+    # Config mounted at /app/config in container
     pgie.set_property("config-file-path", "/app/config/nvinfer_config.txt")
+    # Note: DS 8.0 model paths are absolute in config file
 
     # Converter for OSD
     nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
