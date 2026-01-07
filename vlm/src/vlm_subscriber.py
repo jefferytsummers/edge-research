@@ -15,7 +15,9 @@ from typing import Dict, List, Optional
 import redis.asyncio as redis
 from PIL import Image
 
-from .protocol_evaluator import ProtocolConfig, ProtocolEvaluator, StreamStatus
+import sys
+sys.path.insert(0, '/app/src')
+from protocol_evaluator import ProtocolConfig, ProtocolEvaluator, StreamStatus
 
 logger = logging.getLogger(__name__)
 

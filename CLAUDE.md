@@ -29,10 +29,10 @@ This project follows a **strict container-first architecture**. All development,
 │                                                                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
 │  │  deepstream  │  │     vlm      │  │     app      │          │
-│  │  (NGC 7.0)   │  │  (nano_llm)  │  │  (FastAPI)   │          │
+│  │  (NGC 8.0)   │  │  (nano_llm)  │  │  (FastAPI)   │          │
 │  │              │  │              │  │              │          │
-│  │  YOLOv8-s    │  │  VILA-7B     │  │  WebSocket   │          │
-│  │  Detection   │  │  Protocol    │  │  Frontend    │          │
+│  │  Detection   │  │  VILA        │  │  WebSocket   │          │
+│  │  + pyds      │  │  Protocol    │  │  Frontend    │          │
 │  │              │  │  Evaluator   │  │              │          │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
 │         │                 │                 │                   │
@@ -46,12 +46,87 @@ This project follows a **strict container-first architecture**. All development,
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-| Container | Image | Purpose |
-|-----------|-------|---------|
-| `deepstream` | `nvcr.io/nvidia/deepstream:7.0-gc-triton-devel` | Multi-stream video decode + YOLOv8 detection |
-| `vlm` | `dustynv/nano_llm:r36.4.0` | Protocol evaluation with VILA-7B |
-| `app` | `python:3.11-slim` (custom) | FastAPI backend + React frontend |
-| `redis` | `redis:7-alpine` | Pub/sub messaging between containers |
+| Container | Base Image | Custom | Purpose |
+|-----------|------------|--------|---------|
+| `deepstream` | `nvcr.io/nvidia/deepstream-l4t:8.0-samples-multiarch` | Yes | Video decode + detection (ARM64/Jetson) |
+| `vlm` | `dustynv/nano_llm:r36.4.0` | Yes | Protocol evaluation with VILA |
+| `app` | `python:3.11-slim` | Yes | FastAPI backend + React frontend |
+| `redis` | `redis:7-alpine` | No | Pub/sub messaging between containers |
+
+---
+
+## NGC Container Python Development
+
+**CRITICAL**: NGC containers (DeepStream, etc.) do NOT include Python bindings pre-installed. You MUST use custom Dockerfiles that extend the base images.
+
+### Why Custom Dockerfiles Are Required
+
+NGC containers are optimized for C++ applications. For Python development:
+
+1. **pyds (DeepStream Python bindings)** - Not included, must be installed separately
+2. **python3-gi (GObject introspection)** - Often missing or incomplete
+3. **Python 3.12 venv requirement** - DS 8.0 requires virtual environments for pip
+
+### Standard Pattern for NGC-Based Containers
+
+```dockerfile
+# 1. Start from NGC base image
+FROM nvcr.io/nvidia/deepstream-l4t:8.0-samples-multiarch
+
+# 2. Install apt dependencies (GStreamer/GObject bindings)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-gi python3-gst-1.0 python3-venv python3-pip wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Create venv with --system-site-packages (inherits apt packages)
+RUN python3 -m venv /opt/venv --system-site-packages
+ENV PATH="/opt/venv/bin:$PATH"
+
+# 4. Install pyds wheel (version must match DeepStream version)
+# Filename format: pyds-{version}-cp{pyver}-cp{pyver}-linux_{arch}.whl
+RUN wget -q https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_aarch64.whl \
+    && pip install pyds-1.2.2-cp312-cp312-linux_aarch64.whl
+
+# 5. Install application dependencies
+RUN pip install --no-cache-dir redis opencv-python-headless
+```
+
+### Version Compatibility Matrix
+
+| DeepStream | pyds | Python | Platform | Base Image |
+|------------|------|--------|----------|------------|
+| 8.0 | 1.2.2 | 3.12 | Jetson (L4T) | `deepstream-l4t:8.0-samples-multiarch` |
+| 8.0 | 1.2.2 | 3.12 | x86_64 | `deepstream:8.0-samples-multiarch` |
+| 7.1 | 1.2.0 | 3.10 | Jetson | `deepstream-l4t:7.1-samples-multiarch` |
+
+### pyds Wheel Downloads
+
+Pre-built wheels are available at:
+- https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases
+
+Filename format: `pyds-{version}-cp{pyver}-cp{pyver}-linux_{arch}.whl`
+
+**Example for DS 8.0 (Python 3.12):**
+- **Jetson/ARM64**: `pyds-1.2.2-cp312-cp312-linux_aarch64.whl`
+- **x86_64**: `pyds-1.2.2-cp312-cp312-linux_x86_64.whl`
+
+### Common Mistakes to Avoid
+
+| Mistake | Why It Fails | Correct Approach |
+|---------|--------------|------------------|
+| Using NGC image directly without Dockerfile | No pyds, no python3-gi | Always extend with custom Dockerfile |
+| `pip install` without venv | Python 3.12 blocks system pip | Use `python3 -m venv` first |
+| Creating venv without `--system-site-packages` | Loses python3-gi from apt | Always use `--system-site-packages` |
+| Wrong pyds version | API incompatibility | Match pyds version to DS version |
+| Using x86 image on Jetson | Architecture mismatch | Use `-l4t` images for Jetson |
+
+### dusty-nv Container Notes
+
+The `dustynv/nano_llm` container already includes most Python dependencies but may need:
+- `redis` for pub/sub
+- `Pillow` for image handling
+
+These are lightweight additions via pip in the Dockerfile.
 
 ---
 
@@ -133,16 +208,18 @@ edge-research/
 │   ├── tests/             # pytest tests
 │   └── frontend/          # React + Vite + TypeScript
 │
-├── vlm/                    # VLM inference (dustynv container)
+├── vlm/                    # VLM inference (extends dustynv/nano_llm)
+│   ├── Dockerfile         # Adds redis, Pillow
 │   ├── src/
 │   │   ├── protocol_evaluator.py  # Severity classification
 │   │   └── vlm_subscriber.py      # Redis subscriber
 │   └── tests/
 │
-├── deepstream/            # Video pipeline (NGC container)
-│   ├── config/            # Pipeline configs
+├── deepstream/            # Video pipeline (extends NGC DeepStream)
+│   ├── Dockerfile         # Adds pyds, python3-gi, redis, opencv
+│   ├── config/            # Pipeline configs (nvinfer, labels)
 │   ├── src/
-│   │   └── detection_publisher.py  # Detection → Redis
+│   │   └── deepstream_pipeline.py  # GStreamer pipeline → Redis
 │   └── tests/
 │
 ├── docker-compose.yml     # Container orchestration

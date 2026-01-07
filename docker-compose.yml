@@ -1,7 +1,7 @@
 services:
   # Video decode + detection (NGC official - L4T/Jetson ARM64)
   deepstream:
-    image: nvcr.io/nvidia/deepstream-l4t:8.0-samples-multiarch
+    build: ./deepstream
     runtime: nvidia
     # Use host network to access RTSP stream from Mac
     network_mode: "host"
@@ -26,9 +26,9 @@ services:
       timeout: 10s
       start_period: 60s
 
-  # VLM inference (dustynv official)
+  # VLM inference (dustynv + our deps)
   vlm:
-    image: dustynv/nano_llm:r36.4.0
+    build: ./vlm
     runtime: nvidia
     network_mode: "host"
     volumes:
