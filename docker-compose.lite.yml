@@ -1,0 +1,46 @@
+# Lightweight development - app + redis only
+# No GPU containers, fast startup for UI/API development
+#
+# Usage: docker compose -f docker-compose.lite.yml up -d
+#
+# Ports: 8090 (app), 6380 (redis) - to avoid conflicts with other projects
+
+services:
+  # Application layer (lightweight, custom)
+  app:
+    build: ./app
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./app/src:/app/src:ro
+      - ./app/tests:/app/tests:ro
+      - ./app/frontend:/app/frontend:ro
+      - ./app/pytest.ini:/app/pytest.ini:ro
+      - config_data:/app/data
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+
+  # Message broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+
+volumes:
+  config_data:
+  redis_data:

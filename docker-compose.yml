@@ -1,0 +1,78 @@
+services:
+  # Video decode + detection (NGC official)
+  deepstream:
+    image: nvcr.io/nvidia/deepstream:7.0-gc-triton-devel
+    runtime: nvidia
+    volumes:
+      - ./deepstream/config:/app/config:ro
+      - ./deepstream/src:/app/src:ro
+      - frame_buffer:/shared/frames
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8554/health"]
+      interval: 30s
+      timeout: 10s
+
+  # VLM inference (dustynv official)
+  vlm:
+    image: dustynv/nano_llm:r36.4.0
+    runtime: nvidia
+    volumes:
+      - ./vlm/src:/app/src:ro
+      - model_cache:/root/.cache
+      - frame_buffer:/shared/frames:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import nano_llm"]
+      interval: 30s
+      timeout: 10s
+
+  # Application layer (lightweight, custom)
+  app:
+    build: ./app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./app/src:/app/src:ro
+      - ./app/frontend:/app/frontend:ro
+      - config_data:/app/data
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - deepstream
+      - vlm
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+
+  # Message broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+
+volumes:
+  model_cache:        # VLM model weights
+  config_data:        # SQLite configuration
+  redis_data:         # Redis persistence
+  frame_buffer:       # Shared frame memory
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
