@@ -34,11 +34,35 @@ class Event:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Event":
+        """Create Event from dict, handling both nested and flat formats."""
+        event_type = d.get("type", "unknown")
+        stream_id = d.get("stream_id")
+
+        # Handle timestamp - could be ISO string or unix timestamp
+        ts = d.get("timestamp")
+        if ts is None:
+            timestamp = datetime.utcnow()
+        elif isinstance(ts, (int, float)):
+            timestamp = datetime.utcfromtimestamp(ts)
+        elif isinstance(ts, str):
+            timestamp = datetime.fromisoformat(ts)
+        else:
+            timestamp = datetime.utcnow()
+
+        # Handle data - could be nested or flat
+        if "data" in d and isinstance(d["data"], dict):
+            # Nested format: {"type": "...", "data": {...}}
+            data = d["data"]
+        else:
+            # Flat format: extract all non-meta fields as data
+            data = {k: v for k, v in d.items()
+                    if k not in ("type", "timestamp", "stream_id")}
+
         return cls(
-            type=d["type"],
-            data=d["data"],
-            timestamp=datetime.fromisoformat(d["timestamp"]),
-            stream_id=d.get("stream_id")
+            type=event_type,
+            data=data,
+            timestamp=timestamp,
+            stream_id=stream_id
         )
 
 
