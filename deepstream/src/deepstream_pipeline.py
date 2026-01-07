@@ -328,8 +328,11 @@ def create_pipeline():
     source.connect("pad-added", on_pad_added, depay)
 
     # Add debug probe to streammux src to verify data flow
+    streammux_frame_count = [0]  # Use list to allow mutation in closure
     def streammux_probe(pad, info, user_data):
-        logger.info("Data at streammux src")
+        streammux_frame_count[0] += 1
+        if streammux_frame_count[0] % 100 == 1:  # Log every 100 frames
+            logger.info(f"Streammux: {streammux_frame_count[0]} buffers processed")
         return Gst.PadProbeReturn.OK
 
     smux_srcpad = streammux.get_static_pad("src")
@@ -356,26 +359,33 @@ def build_heartbeat_thread():
     # Based on actual measurements: 246-252 seconds for ResNet18/PeopleNet
     ESTIMATED_BUILD_TIME = 270
 
+    logger.info("Heartbeat thread started")
+
     while not build_heartbeat_stop.is_set():
-        if pipeline_status == "building_engine":
-            elapsed = time.time() - build_start_time
-            # Estimate progress (cap at 95% until actually done)
-            progress = min(int((elapsed / ESTIMATED_BUILD_TIME) * 100), 95)
+        try:
+            if pipeline_status == "building_engine":
+                elapsed = time.time() - build_start_time
+                # Estimate progress (cap at 95% until actually done)
+                progress = min(int((elapsed / ESTIMATED_BUILD_TIME) * 100), 95)
 
-            # Create descriptive message based on progress
-            if progress < 20:
-                message = "Initializing TensorRT engine..."
-            elif progress < 50:
-                message = "Building neural network layers..."
-            elif progress < 80:
-                message = "Optimizing inference kernels..."
-            else:
-                message = "Finalizing engine (almost done)..."
+                # Create descriptive message based on progress
+                if progress < 20:
+                    message = "Initializing TensorRT engine..."
+                elif progress < 50:
+                    message = "Building neural network layers..."
+                elif progress < 80:
+                    message = "Optimizing inference kernels..."
+                else:
+                    message = "Finalizing engine (almost done)..."
 
-            publish_pipeline_status("building_engine", message, progress=progress)
+                publish_pipeline_status("building_engine", message, progress=progress)
+        except Exception as e:
+            logger.error(f"Heartbeat thread error: {e}", exc_info=True)
 
         # Wait 5 seconds before next update (0.2 Hz)
         build_heartbeat_stop.wait(5)
+
+    logger.info("Heartbeat thread exiting")
 
 
 def heartbeat_callback(user_data):
@@ -409,13 +419,9 @@ def main():
     heartbeat_thread = threading.Thread(target=build_heartbeat_thread, daemon=True)
     heartbeat_thread.start()
 
-    # Create pipeline - this triggers TensorRT engine build if not cached
+    # Create pipeline elements
     publish_pipeline_status("building_engine", "Building AI model (first run takes ~4 minutes)...", progress=0)
     pipeline = create_pipeline()
-
-    # Stop build heartbeat thread
-    build_heartbeat_stop.set()
-    heartbeat_thread.join(timeout=1)
 
     # Create event loop
     loop = GLib.MainLoop()
@@ -425,12 +431,17 @@ def main():
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    # Add heartbeat to keep status fresh (every 5 seconds)
+    # Add heartbeat to keep status fresh (every 5 seconds when running)
     GLib.timeout_add_seconds(5, heartbeat_callback, None)
 
-    # Start pipeline
-    logger.info("Starting pipeline...")
+    # Start pipeline - THIS triggers TensorRT engine build (blocking)
+    logger.info("Starting pipeline (TensorRT build happens here)...")
     ret = pipeline.set_state(Gst.State.PLAYING)
+
+    # Stop build heartbeat thread (build is done when set_state returns)
+    build_heartbeat_stop.set()
+    heartbeat_thread.join(timeout=1)
+
     if ret == Gst.StateChangeReturn.FAILURE:
         logger.error("Failed to set pipeline to PLAYING")
         sys.exit(1)

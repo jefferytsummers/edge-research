@@ -9,7 +9,7 @@ services:
       - ./deepstream/config:/app/config:ro
       - ./deepstream/src:/app/src:ro
       - frame_buffer:/shared/frames
-      - ds_engine_cache:/opt/nvidia/deepstream/deepstream/samples/models
+      - ds_engine_cache:/opt/nvidia/deepstream/deepstream-8.0/samples/models
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       # RTSP URI from Mac streaming script - update IP when running
@@ -17,6 +17,8 @@ services:
       - REDIS_URL=redis://localhost:6379
       - STREAM_ID=${STREAM_ID:-stream_0}
       - SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-30}
+      # GStreamer debug for troubleshooting (2=WARN, 3=FIXME, 4=INFO)
+      - GST_DEBUG=2,rtspsrc:4,nvv4l2decoder:4,nvstreammux:4
     command: python3 /app/src/deepstream_pipeline.py
     depends_on:
       redis:
