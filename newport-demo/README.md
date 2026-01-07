@@ -615,51 +615,260 @@ WS /ws/live
 
 ## Tech Stack
 
-| Component | Technology | Reason |
-|-----------|------------|--------|
-| Multi-Stream Decode | DeepStream nvstreammux | Efficient batched decode |
-| Detection | YOLOv8-s TensorRT (batched) | Person detection across all streams |
-| VLM | NanoLLM + VILA-7B | Scene understanding |
-| Event Bus | Python asyncio | Application-level events |
-| API | FastAPI + WebSocket | Real-time updates |
-| Frontend | React + Tailwind | Dashboard UI |
-| Persistence | SQLite (in container volume) | Configuration storage |
-| Container | dustynv/nano_llm + DeepStream | Base runtime |
+| Component | Technology | Container |
+|-----------|------------|-----------|
+| Multi-Stream Decode | DeepStream nvstreammux | `nvcr.io/nvidia/deepstream` |
+| Detection | YOLOv8-s TensorRT (batched) | `nvcr.io/nvidia/deepstream` |
+| VLM | NanoLLM + VILA-7B | `dustynv/nano_llm` |
+| Message Broker | Redis Pub/Sub | `redis:7-alpine` |
+| API + EventBus | FastAPI + WebSocket | Custom `app` container |
+| Frontend | React + Tailwind | Custom `app` container |
+| Persistence | SQLite (in volume) | Custom `app` container |
 
 ---
 
-## Container-First Architecture
+## Multi-Container Architecture
 
-**All code runs inside containers. No supported local execution path.**
+**Microservice composition using official NGC and community containers.**
+
+This follows NVIDIA's Jetson Platform Services (JPS) pattern - separate containers per concern, communicating via Redis.
 
 ```
-Host Machine                          Container
-─────────────                         ─────────
-• IDE / Editor                        • Python runtime
-• Docker runtime         ───────►     • DeepStream SDK
-• GPU drivers                         • NanoLLM
-• Browser (for UI)                    • All dependencies
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         docker-compose.yml                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐ │
+│  │   deepstream        │  │   vlm               │  │   app               │ │
+│  │                     │  │                     │  │                     │ │
+│  │ nvcr.io/nvidia/     │  │ dustynv/nano_llm    │  │ python:3.11-slim    │ │
+│  │ deepstream:7.0      │  │                     │  │ (custom build)      │ │
+│  │                     │  │                     │  │                     │ │
+│  │ • RTSP decode       │  │ • VILA-7B AWQ       │  │ • FastAPI           │ │
+│  │ • nvstreammux       │  │ • Frame description │  │ • EventBus          │ │
+│  │ • YOLOv8 detection  │  │ • Protocol eval     │  │ • WebSocket         │ │
+│  │ • Publishes to Redis│  │ • Publishes to Redis│  │ • React UI          │ │
+│  │                     │  │                     │  │ • SQLite config     │ │
+│  └──────────┬──────────┘  └──────────┬──────────┘  └──────────┬──────────┘ │
+│             │                        │                        │             │
+│             └────────────────────────┼────────────────────────┘             │
+│                                      │                                      │
+│                          ┌───────────▼───────────┐                         │
+│                          │        redis          │                         │
+│                          │    redis:7-alpine     │                         │
+│                          │                       │                         │
+│                          │  Channels:            │                         │
+│                          │  • frames:{stream_id} │                         │
+│                          │  • detections         │                         │
+│                          │  • summaries          │                         │
+│                          │  • alerts             │                         │
+│                          └───────────────────────┘                         │
+│                                                                              │
+│  Shared Volumes:                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  frame_buffer (tmpfs)  │  model_cache  │  config_data  │  redis_data │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Multi-Container?
+
+| Benefit | Explanation |
+|---------|-------------|
+| **Official images** | Use NGC DeepStream and dustynv/nano_llm as-is |
+| **No dependency conflicts** | DeepStream and NanoLLM don't share a container |
+| **Independent updates** | Update VLM container without touching video pipeline |
+| **Separation of concerns** | Each container does one thing well |
+| **Matches JPS pattern** | NVIDIA's own recommended architecture |
+
+### docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  # Video decode + detection (NGC official)
+  deepstream:
+    image: nvcr.io/nvidia/deepstream:7.0-gc-triton-devel
+    runtime: nvidia
+    volumes:
+      - ./deepstream/config:/app/config:ro
+      - ./deepstream/src:/app/src:ro          # Dev: mount source
+      - frame_buffer:/shared/frames
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8554/health"]
+      interval: 30s
+      timeout: 10s
+
+  # VLM inference (dustynv official)
+  vlm:
+    image: dustynv/nano_llm:r36.4.0
+    runtime: nvidia
+    volumes:
+      - ./vlm/src:/app/src:ro                 # Dev: mount source
+      - model_cache:/root/.cache
+      - frame_buffer:/shared/frames:ro        # Read frames
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import nano_llm"]
+      interval: 30s
+      timeout: 10s
+
+  # Application layer (lightweight, custom)
+  app:
+    build: ./app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./app/src:/app/src:ro                 # Dev: mount source
+      - ./app/frontend:/app/frontend:ro
+      - config_data:/app/data
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - deepstream
+      - vlm
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+
+  # Message broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+
+volumes:
+  model_cache:        # VLM model weights
+  config_data:        # SQLite configuration
+  redis_data:         # Redis persistence
+  frame_buffer:       # Shared frame memory
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs   # In-memory for fast frame sharing
+```
+
+### Communication Flow
+
+```
+DeepStream Container              Redis Pub/Sub              VLM Container
+────────────────────              ──────────────              ─────────────
+
+1. Decode RTSP streams
+2. Run YOLOv8 detection
+3. Write frame to /shared/frames
+4. PUBLISH detections ──────────► channel: detections
+                                        │
+                                        ├─────────────────────► 5. SUBSCRIBE
+                                        │                       6. Read frame
+                                        │                       7. Run VILA
+                                        │                       8. PUBLISH ──►
+                                  channel: summaries
+                                        │
+App Container ◄─────────────────────────┘
+9. SUBSCRIBE to all channels
+10. Update EventBus state
+11. Push to WebSocket clients
 ```
 
 ### Development Workflow
 
 ```bash
-# ALL commands run inside container
+# Start all containers
+make dev              # → docker compose up -d
 
-make dev          # Start development container
-make test         # Run tests inside container
-make shell        # Open bash inside container
-make logs         # View container logs
+# View logs from all services
+make logs             # → docker compose logs -f
+
+# View logs from specific service
+make logs-vlm         # → docker compose logs -f vlm
+
+# Run tests (in app container)
+make test             # → docker compose exec app pytest
+
+# Shell into specific container
+make shell-app        # → docker compose exec app bash
+make shell-vlm        # → docker compose exec vlm bash
+make shell-ds         # → docker compose exec deepstream bash
+
+# Rebuild specific service
+make build-app        # → docker compose build app
+```
+
+### Makefile
+
+```makefile
+COMPOSE = docker compose
+
+.PHONY: dev stop logs test shell-app shell-vlm shell-ds
+
+dev:
+	$(COMPOSE) up -d
+
+stop:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs -f
+
+logs-app:
+	$(COMPOSE) logs -f app
+
+logs-vlm:
+	$(COMPOSE) logs -f vlm
+
+logs-ds:
+	$(COMPOSE) logs -f deepstream
+
+test:
+	$(COMPOSE) exec app pytest tests/ -v
+
+shell-app:
+	$(COMPOSE) exec app bash
+
+shell-vlm:
+	$(COMPOSE) exec vlm bash
+
+shell-ds:
+	$(COMPOSE) exec deepstream bash
+
+build-app:
+	$(COMPOSE) build app
+
+build-all:
+	$(COMPOSE) build
+
+restart-%:
+	$(COMPOSE) restart $*
 ```
 
 ### Data Persistence
 
-Configuration persists via Docker volumes:
-
 ```yaml
 volumes:
-  - newport_config:/app/data     # SQLite config database
-  - model_cache:/root/.cache     # Model weights
+  config_data:/app/data      # SQLite config (app container)
+  model_cache:/root/.cache   # VLM weights (vlm container)
+  redis_data:/data           # Redis persistence
+  frame_buffer:tmpfs         # In-memory frame sharing
 ```
 
 ---

@@ -12,37 +12,41 @@ Development backlog for the Newport Demo - a multi-stream behavioral monitoring 
 
 ## Epic Summary
 
-| Epic | Description | Size |
-|------|-------------|------|
-| N0 | Container-First Environment | S |
-| N1 | Persistent Configuration | M |
-| N2 | Setup Wizard UI | L |
-| N3 | DeepStream Multi-Stream Pipeline | L |
-| N4 | Protocol Evaluation Engine | M |
-| N5 | Multi-Feed Dashboard | L |
-| N6 | Alert System | M |
-| N7 | Demo Mode & Polish | M |
+| Epic | Description | Container | Size |
+|------|-------------|-----------|------|
+| N0 | Multi-Container Environment | All | M |
+| N1 | Persistent Configuration | app | M |
+| N2 | Setup Wizard UI | app | L |
+| N3 | DeepStream Multi-Stream Pipeline | deepstream | L |
+| N4 | VLM Protocol Evaluation | vlm | L |
+| N5 | Multi-Feed Dashboard | app | L |
+| N6 | Alert System | app | M |
+| N7 | Demo Mode & Polish | All | M |
 
 ---
 
-## Epic N0: Container-First Environment
+## Epic N0: Multi-Container Environment
 
-**Goal:** All code runs inside containers. No local execution supported.
+**Goal:** Microservice composition using official NGC + community containers. No custom base image layering.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| N0.1 | Create Dockerfile with DeepStream + NanoLLM | M | Container builds, GPU accessible |
-| N0.2 | Create docker-compose.yml for development | S | `docker compose up` starts services |
-| N0.3 | Configure volumes for code hot-reload | S | Source changes reflect without rebuild |
-| N0.4 | Create volume for persistent config | S | SQLite data persists across restarts |
-| N0.5 | Create Makefile wrapping docker commands | S | `make dev`, `make test`, `make shell` work |
-| N0.6 | Add container health checks | S | Docker knows when app is ready |
+| N0.1 | Create docker-compose.yml with 4 services | M | deepstream, vlm, app, redis all start |
+| N0.2 | Configure DeepStream container from NGC | M | `nvcr.io/nvidia/deepstream:7.0` runs with GPU |
+| N0.3 | Configure VLM container from dustynv | S | `dustynv/nano_llm:r36.4.0` runs with GPU |
+| N0.4 | Create lightweight app container Dockerfile | S | FastAPI + React app builds |
+| N0.5 | Configure Redis for pub/sub messaging | S | Containers can publish/subscribe |
+| N0.6 | Configure shared tmpfs volume for frames | S | DeepStream writes, VLM reads frames |
+| N0.7 | Configure persistent volumes (config, models) | S | Data survives container restarts |
+| N0.8 | Create Makefile with per-service commands | M | `make shell-vlm`, `make logs-ds` work |
+| N0.9 | Add health checks to all services | S | Docker knows when each service is ready |
 
-**Container-First Principles:**
-- **No local Python** - all execution via `docker compose exec`
-- **Same image dev → prod** - development = production + volume mounts
-- **Makefile abstracts Docker** - developers run `make test`, not docker commands
-- **Persistence via volumes** - config database survives container restarts
+**Multi-Container Principles:**
+- **Official images as-is** - NGC DeepStream and dustynv/nano_llm without modification
+- **Redis for messaging** - Pub/sub between containers, no direct coupling
+- **Shared memory for frames** - tmpfs volume for zero-copy frame sharing
+- **Lightweight app container** - Only custom Dockerfile is for FastAPI/React app
+- **Per-service dev workflow** - `make shell-vlm`, `make logs-ds`, etc.
 
 ---
 
@@ -91,7 +95,7 @@ Development backlog for the Newport Demo - a multi-stream behavioral monitoring 
 
 ## Epic N3: DeepStream Multi-Stream Pipeline
 
-**Goal:** Efficient batched processing of multiple camera feeds.
+**Goal:** Efficient batched processing in DeepStream container, publishing to Redis.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
@@ -99,54 +103,62 @@ Development backlog for the Newport Demo - a multi-stream behavioral monitoring 
 | N3.2 | Implement nvstreammux for stream batching | M | Multiple RTSP inputs batched |
 | N3.3 | Add batched YOLOv8 inference | M | Detection runs on batched frames |
 | N3.4 | Implement stream demuxing for per-stream data | M | Detections tagged with stream_id |
-| N3.5 | Create DeepStream → EventBus bridge | M | Probe callback queues to async bus |
-| N3.6 | Add dynamic stream add/remove | L | Add stream without restart |
-| N3.7 | Implement stream health monitoring | S | Detect disconnections per stream |
-| N3.8 | Add reconnection logic | M | Auto-reconnect dropped streams |
+| N3.5 | Write frames to shared tmpfs volume | M | Frames accessible by VLM container |
+| N3.6 | Publish detections to Redis | M | `PUBLISH detections {stream_id, boxes, timestamp}` |
+| N3.7 | Add dynamic stream add/remove | L | Add stream without restart |
+| N3.8 | Implement stream health monitoring | S | Detect disconnections per stream |
+| N3.9 | Add reconnection logic | M | Auto-reconnect dropped streams |
 
 **Technical Notes:**
-- DeepStream 7.x with Python bindings
+- DeepStream 7.x with Python bindings in NGC container
 - nvstreammux batch-size = number of streams
 - Probe on nvinfer src pad for detections
-- Thread-safe queue bridges to asyncio
+- Frames written to `/shared/frames/{stream_id}/latest.jpg`
+- Redis publish for inter-container messaging
 
 **Reference:**
 ```python
-# DeepStream multi-source config
-[source0]
-enable=1
-type=4
-uri=rtsp://192.168.1.101:554/stream
+# DeepStream → Redis publishing
+import redis
 
-[source1]
-enable=1
-type=4
-uri=rtsp://192.168.1.102:554/stream
+r = redis.Redis.from_url(os.environ['REDIS_URL'])
 
-[streammux]
-batch-size=4
-width=1920
-height=1080
+def on_detection(stream_id, detections):
+    # Write frame to shared volume
+    frame_path = f"/shared/frames/{stream_id}/latest.jpg"
+    cv2.imwrite(frame_path, frame)
+
+    # Publish detection event
+    r.publish('detections', json.dumps({
+        'stream_id': stream_id,
+        'frame_path': frame_path,
+        'detections': detections,
+        'timestamp': time.time()
+    }))
 ```
 
 ---
 
-## Epic N4: Protocol Evaluation Engine
+## Epic N4: Protocol Evaluation Engine (VLM Container)
 
-**Goal:** Map VLM descriptions to user-defined severity levels.
+**Goal:** VLM container subscribes to detections, evaluates protocols, publishes summaries.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| N4.1 | Create ProtocolEvaluator class | M | Takes description, returns severity |
-| N4.2 | Implement VLM-based rule matching | M | Prompt engineering for classification |
-| N4.3 | Create icon selection logic | S | Severity + context → icon |
-| N4.4 | Implement round-robin VLM sampling | M | Fair sampling across streams |
-| N4.5 | Add detection-based fast path | S | Missing person → RED without VLM |
-| N4.6 | Create status state machine | M | Track transitions, debounce |
-| N4.7 | Emit status.changed events | S | EventBus integration |
-| N4.8 | Add confidence scoring | S | Low confidence → YELLOW fallback |
+| N4.1 | Subscribe to Redis `detections` channel | S | VLM container receives detection events |
+| N4.2 | Read frames from shared volume | S | Load frame from `/shared/frames/{stream_id}/` |
+| N4.3 | Create ProtocolEvaluator class | M | Takes description, returns severity |
+| N4.4 | Implement VLM-based rule matching | M | Prompt engineering for classification |
+| N4.5 | Create icon selection logic | S | Severity + context → icon |
+| N4.6 | Implement round-robin VLM sampling | M | Fair sampling across streams |
+| N4.7 | Add detection-based fast path | S | Missing person → RED without VLM |
+| N4.8 | Create status state machine | M | Track transitions, debounce |
+| N4.9 | Publish summaries to Redis | S | `PUBLISH summaries {stream_id, severity, icon, text}` |
+| N4.10 | Add confidence scoring | S | Low confidence → YELLOW fallback |
 
 **Technical Notes:**
+- Runs inside `dustynv/nano_llm` container
+- Subscribes to `detections` channel, publishes to `summaries` channel
 - VLM prompt returns: `SEVERITY|ICON|MESSAGE`
 - Fast path for critical detections (no person in frame)
 - Debounce: require N consecutive classifications before change
@@ -251,44 +263,43 @@ class StatusStateMachine:
 
 | Epic | Stories | S | M | L |
 |------|---------|---|---|---|
-| N0. Container-First | 6 | 5 | 1 | 0 |
+| N0. Multi-Container | 9 | 6 | 3 | 0 |
 | N1. Configuration | 6 | 4 | 2 | 0 |
 | N2. Setup Wizard | 9 | 4 | 5 | 0 |
-| N3. DeepStream Pipeline | 8 | 2 | 5 | 1 |
-| N4. Protocol Evaluation | 8 | 4 | 4 | 0 |
+| N3. DeepStream Pipeline | 9 | 2 | 6 | 1 |
+| N4. VLM Protocol Eval | 10 | 5 | 5 | 0 |
 | N5. Dashboard | 10 | 3 | 7 | 0 |
 | N6. Alert System | 10 | 6 | 4 | 0 |
 | N7. Demo Mode | 9 | 5 | 4 | 0 |
-| **Total** | **66** | **33** | **32** | **1** |
+| **Total** | **72** | **35** | **36** | **1** |
 
 ---
 
 ## Sprint Structure
 
-### Sprint N1: Container Foundation
-- Epic N0 (Container-First) - All
+### Sprint N1: Multi-Container Foundation
+- Epic N0 (Multi-Container) - All
 - Epic N1 (Configuration) - All
-- Epic N3 (DeepStream) - N3.1, N3.2, N3.3
 
-**Demo:** `make dev` starts container, multi-stream decode running, config persists.
+**Demo:** `make dev` starts 4 containers, Redis pub/sub working, config persists.
 
-### Sprint N2: Pipeline & Evaluation
-- Epic N3 (DeepStream) - N3.4, N3.5, N3.6, N3.7, N3.8
-- Epic N4 (Protocol Evaluation) - All
+### Sprint N2: DeepStream + VLM Pipeline
+- Epic N3 (DeepStream) - All
+- Epic N4 (VLM Protocol Eval) - All
 
-**Demo:** Streams classified as GREEN/YELLOW/RED based on rules.
+**Demo:** Multi-stream decode → Redis → VLM → status classification working.
 
 ### Sprint N3: UI - Wizard & Dashboard
 - Epic N2 (Setup Wizard) - All
 - Epic N5 (Dashboard) - N5.1 through N5.5
 
-**Demo:** Full setup flow, basic dashboard showing feeds.
+**Demo:** Full setup flow, basic dashboard showing feeds with status icons.
 
 ### Sprint N4: UI - Polish & Alerts
 - Epic N5 (Dashboard) - N5.6 through N5.10
 - Epic N6 (Alert System) - All
 
-**Demo:** Complete UI with alerts and Q&A.
+**Demo:** Complete UI with alerts and Q&A per feed.
 
 ### Sprint N5: Demo & Polish
 - Epic N7 (Demo Mode) - All
@@ -309,10 +320,11 @@ The Newport Demo depends on these MVP components:
 | WebSocket Handler | Multi-stream event forwarding |
 
 **New Components (Newport-specific):**
-- DeepStream multi-stream pipeline
-- Protocol evaluation engine
+- Multi-container orchestration (docker-compose)
+- DeepStream container (NGC official)
+- VLM container (dustynv official)
+- Redis pub/sub messaging
 - Setup wizard
-- SQLite persistence
 - Multi-feed dashboard
 
 ---
@@ -321,11 +333,14 @@ The Newport Demo depends on these MVP components:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
+| Redis latency between containers | Low | Medium | Use tmpfs for frames, Redis for metadata only |
 | DeepStream Python complexity | Medium | High | Reference deepstream_python_apps |
 | VLM latency with many streams | High | Medium | Round-robin sampling, fast detection path |
 | Memory pressure (4+ streams) | Medium | High | Profile early, limit resolution |
+| Container orchestration complexity | Medium | Medium | Start with 2 streams, scale up |
+| GPU memory sharing between containers | Medium | High | Monitor with `tegrastats`, tune batch sizes |
 | Demo video quality | Low | Medium | Use real facility footage if available |
-| Dynamic stream add/remove | High | Medium | MVP: require restart, enhance later |
+| Dynamic stream add/remove | High | Medium | MVP: require container restart |
 
 ---
 
@@ -333,15 +348,16 @@ The Newport Demo depends on these MVP components:
 
 | Criterion | Measurement |
 |-----------|-------------|
-| `make dev` starts full environment | Container starts, app accessible |
-| All tests pass via `make test` | Tests run inside container |
+| `make dev` starts all 4 containers | deepstream, vlm, app, redis all healthy |
+| All tests pass via `make test` | Tests run inside app container |
+| Redis pub/sub messaging works | Detection → VLM → App flow verified |
 | Setup wizard completes in <2 minutes | User test |
 | 4 streams at 720p, 15fps | Performance test |
-| Status updates within 5 seconds | Timing |
+| Status updates within 5 seconds | End-to-end timing |
 | Correct classification >85% | Manual evaluation |
-| RED alerts appear within 3 seconds | Timing |
-| Config persists across container restart | Functional test (volume persistence) |
-| Demo runs 30 minutes stable | Stability test |
+| RED alerts appear within 3 seconds | Detection → Alert timing |
+| Config persists across container restart | Volume persistence verified |
+| Demo runs 30 minutes stable | All containers stable, no memory leak |
 
 ---
 
