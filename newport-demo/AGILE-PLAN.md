@@ -14,6 +14,7 @@ Development backlog for the Newport Demo - a multi-stream behavioral monitoring 
 
 | Epic | Description | Size |
 |------|-------------|------|
+| N0 | Container-First Environment | S |
 | N1 | Persistent Configuration | M |
 | N2 | Setup Wizard UI | L |
 | N3 | DeepStream Multi-Stream Pipeline | L |
@@ -21,6 +22,27 @@ Development backlog for the Newport Demo - a multi-stream behavioral monitoring 
 | N5 | Multi-Feed Dashboard | L |
 | N6 | Alert System | M |
 | N7 | Demo Mode & Polish | M |
+
+---
+
+## Epic N0: Container-First Environment
+
+**Goal:** All code runs inside containers. No local execution supported.
+
+| ID | Story | Size | Acceptance Criteria |
+|----|-------|------|---------------------|
+| N0.1 | Create Dockerfile with DeepStream + NanoLLM | M | Container builds, GPU accessible |
+| N0.2 | Create docker-compose.yml for development | S | `docker compose up` starts services |
+| N0.3 | Configure volumes for code hot-reload | S | Source changes reflect without rebuild |
+| N0.4 | Create volume for persistent config | S | SQLite data persists across restarts |
+| N0.5 | Create Makefile wrapping docker commands | S | `make dev`, `make test`, `make shell` work |
+| N0.6 | Add container health checks | S | Docker knows when app is ready |
+
+**Container-First Principles:**
+- **No local Python** - all execution via `docker compose exec`
+- **Same image dev → prod** - development = production + volume mounts
+- **Makefile abstracts Docker** - developers run `make test`, not docker commands
+- **Persistence via volumes** - config database survives container restarts
 
 ---
 
@@ -229,6 +251,7 @@ class StatusStateMachine:
 
 | Epic | Stories | S | M | L |
 |------|---------|---|---|---|
+| N0. Container-First | 6 | 5 | 1 | 0 |
 | N1. Configuration | 6 | 4 | 2 | 0 |
 | N2. Setup Wizard | 9 | 4 | 5 | 0 |
 | N3. DeepStream Pipeline | 8 | 2 | 5 | 1 |
@@ -236,17 +259,18 @@ class StatusStateMachine:
 | N5. Dashboard | 10 | 3 | 7 | 0 |
 | N6. Alert System | 10 | 6 | 4 | 0 |
 | N7. Demo Mode | 9 | 5 | 4 | 0 |
-| **Total** | **60** | **28** | **31** | **1** |
+| **Total** | **66** | **33** | **32** | **1** |
 
 ---
 
 ## Sprint Structure
 
-### Sprint N1: Foundation
+### Sprint N1: Container Foundation
+- Epic N0 (Container-First) - All
 - Epic N1 (Configuration) - All
 - Epic N3 (DeepStream) - N3.1, N3.2, N3.3
 
-**Demo:** Multi-stream decode running, config persists.
+**Demo:** `make dev` starts container, multi-stream decode running, config persists.
 
 ### Sprint N2: Pipeline & Evaluation
 - Epic N3 (DeepStream) - N3.4, N3.5, N3.6, N3.7, N3.8
@@ -309,12 +333,14 @@ The Newport Demo depends on these MVP components:
 
 | Criterion | Measurement |
 |-----------|-------------|
+| `make dev` starts full environment | Container starts, app accessible |
+| All tests pass via `make test` | Tests run inside container |
 | Setup wizard completes in <2 minutes | User test |
 | 4 streams at 720p, 15fps | Performance test |
 | Status updates within 5 seconds | Timing |
 | Correct classification >85% | Manual evaluation |
 | RED alerts appear within 3 seconds | Timing |
-| Config persists across restart | Functional test |
+| Config persists across container restart | Functional test (volume persistence) |
 | Demo runs 30 minutes stable | Stability test |
 
 ---

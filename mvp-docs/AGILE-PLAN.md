@@ -269,18 +269,26 @@ flowchart LR
 
 ---
 
-## Epic 1: Development Environment
+## Epic 1: Container-First Development Environment
 
-**Goal:** Reproducible development setup that matches production Jetson environment.
+**Goal:** All code runs inside containers. No supported local execution path.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
 | E1.1 | Set up base container from `dustynv/nano_llm` | S | Container runs on Jetson, GPU accessible |
-| E1.2 | Create docker-compose.yml for local development | S | `docker compose up` starts all services |
+| E1.2 | Create docker-compose.yml for development | S | `docker compose up` starts all services |
 | E1.3 | Configure volume mounts for code hot-reload | S | Code changes reflect without rebuild |
 | E1.4 | Set up model cache volume | S | Models persist across container restarts |
-| E1.5 | Create Makefile with common commands | S | `make run`, `make test`, `make build` work |
-| E1.6 | Document development setup in README | S | New developer can start in <30 min |
+| E1.5 | Create Makefile wrapping all docker commands | M | `make run`, `make test`, `make shell` all exec inside container |
+| E1.6 | Create .devcontainer for VS Code | S | VS Code Remote Containers works |
+| E1.7 | Document container-first workflow in README | S | New developer can start in <30 min |
+| E1.8 | Add container health check | S | Docker knows when app is ready |
+
+**Container-First Principles:**
+- **No local Python execution** - all code runs via `docker compose exec`
+- **Same image dev → prod** - development container = production container + volume mounts
+- **Makefile abstracts Docker** - developers run `make test`, not `docker compose exec...`
+- **VS Code attaches to container** - IDE runs on host, execution in container
 
 ---
 
@@ -571,45 +579,48 @@ response = model.generate(
 
 ---
 
-## Epic 12: Configuration & Deployment
+## Epic 12: Container Deployment
 
-**Goal:** Production-ready container deployment.
+**Goal:** Production-ready container deployment. Same container dev → prod.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E12.1 | Create production Dockerfile | M | Builds, includes all dependencies |
-| E12.2 | Create production docker-compose.yml | S | Single command deployment |
+| E12.1 | Create production Dockerfile (multi-stage) | M | Builds frontend, then backend in one image |
+| E12.2 | Create production docker-compose.yml | S | Single command deployment, no volume mounts |
 | E12.3 | Implement YAML configuration loading | S | Config from file + env overrides |
 | E12.4 | Add structured JSON logging with events | S | Logs include event types, correlation IDs |
 | E12.5 | Implement graceful shutdown (stop EventBus) | M | SIGTERM handled, bus stopped, resources cleaned |
-| E12.6 | Create Jetson setup script | M | Provisions new device |
+| E12.6 | Create Jetson setup script (Docker + drivers only) | M | Provisions new device with Docker, nvidia-container-toolkit |
 | E12.7 | Add health check to Dockerfile | S | Docker knows when app is healthy |
-| E12.8 | Document deployment process | S | README covers production setup |
+| E12.8 | Document deployment process | S | README covers container-only production setup |
 
 **Technical Notes:**
+- **Container-first:** Production = same image as dev, without volume mounts
 - Graceful shutdown must stop EventBus and let handlers complete
 - Multi-stage build: frontend → backend
 - Model cache in named volume
+- Jetson setup script only installs Docker + nvidia-container-toolkit, no Python
 
 ---
 
 ## Epic 13: Testing & Quality
 
-**Goal:** Confidence in correctness and stability.
+**Goal:** Confidence in correctness and stability. All tests run in container.
 
 | ID | Story | Size | Acceptance Criteria |
 |----|-------|------|---------------------|
-| E13.1 | Set up pytest infrastructure | S | Tests run, report results |
+| E13.1 | Set up pytest infrastructure in container | S | `make test` runs pytest inside container |
 | E13.2 | Write unit tests for EventBus | M | Emit, subscribe, unsubscribe tested |
 | E13.3 | Write unit tests for Agent | M | Tool dispatch tested via events |
 | E13.4 | Write unit tests for each tool | M | Each tool has tests |
 | E13.5 | Write integration test for event flows | M | End-to-end event chains tested |
 | E13.6 | Create mock event source for testing | M | Tests run without real camera |
-| E13.7 | Add type hints throughout | M | mypy passes |
-| E13.8 | Add ruff linting | S | Code style consistent |
+| E13.7 | Add type hints throughout | M | mypy passes (run via `make typecheck`) |
+| E13.8 | Add ruff linting | S | `make lint` passes |
 | E13.9 | Create stability test (1hr run) | M | No crashes, no memory leak |
 
 **Technical Notes:**
+- **All tests run inside container** via `make test`
 - Event-driven architecture makes testing easier
 - Mock events instead of mocking dependencies
 - Event replay utility (E2.6) useful for integration tests
@@ -620,7 +631,7 @@ response = model.generate(
 
 | Epic | Stories | S | M | L |
 |------|---------|---|---|---|
-| 1. Dev Environment | 6 | 6 | 0 | 0 |
+| 1. Container-First Dev | 8 | 7 | 1 | 0 |
 | 2. Event Bus | 8 | 4 | 4 | 0 |
 | 3. Video Pipeline | 8 | 4 | 4 | 0 |
 | 4. Detection | 7 | 4 | 3 | 0 |
@@ -633,17 +644,17 @@ response = model.generate(
 | 11. Frontend | 11 | 3 | 8 | 0 |
 | 12. Deployment | 8 | 4 | 4 | 0 |
 | 13. Testing | 9 | 3 | 6 | 0 |
-| **Total** | **107** | **52** | **55** | **0** |
+| **Total** | **109** | **53** | **56** | **0** |
 
 ---
 
 ## Recommended Sprint Structure
 
-### Sprint 1: Foundation & Event Bus
-- Epic 1 (Dev Environment) - All
+### Sprint 1: Container Foundation & Event Bus
+- Epic 1 (Container-First Dev) - All
 - Epic 2 (Event Bus) - All
 
-**Demo:** EventBus running, events emitting and logging in test harness.
+**Demo:** `make dev` starts container, `make test` runs EventBus tests inside container.
 
 ### Sprint 2: Video & Detection Pipeline
 - Epic 3 (Video Pipeline) - All
@@ -683,11 +694,12 @@ response = model.generate(
 A story is complete when:
 
 1. **Code** - Implementation complete and merged
-2. **Events** - Emits/listens to correct events per spec
-3. **Tests** - Unit/integration tests pass
-4. **Docs** - Code documented, README updated if needed
-5. **Review** - Code reviewed (or self-reviewed for solo dev)
-6. **Works on Jetson** - Tested on actual hardware
+2. **Container** - Works inside container (`make dev` + `make test` pass)
+3. **Events** - Emits/listens to correct events per spec
+4. **Tests** - Unit/integration tests pass (via `make test`)
+5. **Docs** - Code documented, README updated if needed
+6. **Review** - Code reviewed (or self-reviewed for solo dev)
+7. **Works on Jetson** - Tested on actual hardware (in container)
 
 ---
 

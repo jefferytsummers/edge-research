@@ -334,12 +334,29 @@ class LiveVideoTools:
 
 ## Technical Constraints
 
+### Container-First Architecture
+
+**All code runs inside containers. There is no supported "local" execution path.**
+
+| Principle | Rationale |
+|-----------|-----------|
+| Container is the runtime | Dependencies, GPU drivers, and environment are only validated in container |
+| No local Python execution | Avoid "works on my machine" - container is the machine |
+| Development inside containers | Use volume mounts for code, but execution is always containerized |
+| Same image dev → prod | Development container = production container (with volume mounts) |
+
+**Implications:**
+- IDE runs on host, code executes in container
+- All `make` / `npm` / `pytest` commands run via `docker exec` or `docker compose run`
+- No `pip install` on host machine
+- `.devcontainer/` provided for VS Code Remote Containers support
+
 ### Required: NVIDIA Ecosystem
 
 | Component | Requirement | Rationale |
 |-----------|-------------|-----------|
 | Base Container | `dustynv/nano_llm:r36.4.0` | Validated for Jetson, includes TensorRT |
-| Video Pipeline | DeepStream SDK | Hardware-accelerated decode, efficient batching |
+| Video Pipeline | NanoLLM VideoSource | Hardware-accelerated via jetson-utils |
 | VLM Runtime | NanoLLM | Optimized for Jetson, streaming support |
 | Detection | TensorRT engine | INT8 quantization, <10ms inference |
 
@@ -347,7 +364,8 @@ class LiveVideoTools:
 
 | Practice | Implementation |
 |----------|----------------|
-| Container-based deployment | Single Dockerfile, docker-compose |
+| Container-first development | All code runs in containers, never on bare host |
+| Single container deployment | One Dockerfile, docker-compose for orchestration |
 | Health monitoring | `/health` endpoint with GPU metrics |
 | Structured logging | JSON logs with correlation IDs |
 | Configuration management | Environment variables + YAML config |
@@ -596,7 +614,12 @@ logging:
 
 ---
 
-## Docker Configuration
+## Docker Configuration (Container-First)
+
+**All execution happens inside containers.** The host machine only provides:
+- IDE / editor
+- Docker runtime
+- GPU drivers
 
 ### Dockerfile
 
@@ -616,7 +639,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application (production only - dev uses volume mounts)
 COPY src/ ./src/
 COPY config/ ./config/
 
@@ -632,7 +655,7 @@ EXPOSE 8080
 ENTRYPOINT ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 
-### docker-compose.yml
+### docker-compose.yml (Development)
 
 ```yaml
 version: '3.8'
@@ -649,8 +672,11 @@ services:
     devices:
       - /dev/video0:/dev/video0  # USB camera
     volumes:
+      # Development: mount source for hot-reload
+      - ./src:/app/src:ro
       - ./config:/app/config:ro
-      - model_cache:/root/.cache  # Cache TensorRT engines
+      - ./tests:/app/tests:ro
+      - model_cache:/root/.cache
     deploy:
       resources:
         reservations:
@@ -659,6 +685,67 @@ services:
 
 volumes:
   model_cache:
+```
+
+### Development Workflow
+
+```bash
+# ALL commands run inside container - never on host
+
+# Start development environment
+make dev                    # → docker compose up -d
+
+# Run tests
+make test                   # → docker compose exec edge-vision pytest
+
+# Run linter
+make lint                   # → docker compose exec edge-vision ruff check .
+
+# Add a dependency (updates requirements.txt, rebuilds)
+make add-dep DEP=requests   # → docker compose exec edge-vision pip install requests
+                            # → docker compose exec edge-vision pip freeze > requirements.txt
+                            # → docker compose build
+
+# Open shell inside container
+make shell                  # → docker compose exec edge-vision bash
+
+# View logs
+make logs                   # → docker compose logs -f
+```
+
+### Makefile
+
+```makefile
+.PHONY: dev test lint shell logs build
+
+COMPOSE = docker compose
+EXEC = $(COMPOSE) exec edge-vision
+
+dev:
+	$(COMPOSE) up -d
+
+stop:
+	$(COMPOSE) down
+
+test:
+	$(EXEC) pytest tests/ -v
+
+lint:
+	$(EXEC) ruff check src/
+
+shell:
+	$(EXEC) bash
+
+logs:
+	$(COMPOSE) logs -f
+
+build:
+	$(COMPOSE) build --no-cache
+
+# Production build (no volume mounts)
+prod:
+	docker build -t edge-vision:latest .
+	docker run --runtime nvidia -p 8080:8080 edge-vision:latest
 ```
 
 ---

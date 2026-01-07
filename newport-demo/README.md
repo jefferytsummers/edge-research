@@ -623,8 +623,44 @@ WS /ws/live
 | Event Bus | Python asyncio | Application-level events |
 | API | FastAPI + WebSocket | Real-time updates |
 | Frontend | React + Tailwind | Dashboard UI |
-| Persistence | SQLite or JSON file | Configuration storage |
+| Persistence | SQLite (in container volume) | Configuration storage |
 | Container | dustynv/nano_llm + DeepStream | Base runtime |
+
+---
+
+## Container-First Architecture
+
+**All code runs inside containers. No supported local execution path.**
+
+```
+Host Machine                          Container
+─────────────                         ─────────
+• IDE / Editor                        • Python runtime
+• Docker runtime         ───────►     • DeepStream SDK
+• GPU drivers                         • NanoLLM
+• Browser (for UI)                    • All dependencies
+```
+
+### Development Workflow
+
+```bash
+# ALL commands run inside container
+
+make dev          # Start development container
+make test         # Run tests inside container
+make shell        # Open bash inside container
+make logs         # View container logs
+```
+
+### Data Persistence
+
+Configuration persists via Docker volumes:
+
+```yaml
+volumes:
+  - newport_config:/app/data     # SQLite config database
+  - model_cache:/root/.cache     # Model weights
+```
 
 ---
 
