@@ -1,12 +1,61 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStreamStore, useAlertStore } from '@/store';
-import type { WSMessage, WSStatusUpdate, WSAlert } from '@/types';
+import type { WSMessage, WSStatusUpdate, WSAlert, WSQueryResponse } from '@/types';
+
+// Audio context for alert sounds
+let audioContext: AudioContext | null = null;
+
+/**
+ * Play an alert sound for critical alerts using Web Audio API.
+ * Creates a distinct two-tone alarm pattern.
+ */
+function playAlertSound() {
+  try {
+    // Initialize AudioContext on first use (needs user interaction)
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    }
+
+    // Resume if suspended (browser autoplay policy)
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+
+    const now = audioContext.currentTime;
+
+    // Create oscillator for alarm tone
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    // Two-tone alarm pattern (high-low-high)
+    oscillator.type = 'square';
+
+    // Schedule frequency changes for alarm pattern
+    oscillator.frequency.setValueAtTime(880, now);        // High A
+    oscillator.frequency.setValueAtTime(660, now + 0.15); // E
+    oscillator.frequency.setValueAtTime(880, now + 0.3);  // High A
+    oscillator.frequency.setValueAtTime(660, now + 0.45); // E
+
+    // Volume envelope
+    gainNode.gain.setValueAtTime(0.3, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+
+    oscillator.start(now);
+    oscillator.stop(now + 0.6);
+  } catch (error) {
+    console.warn('Failed to play alert sound:', error);
+  }
+}
 
 interface UseWebSocketOptions {
   url?: string;
   autoConnect?: boolean;
   reconnectInterval?: number;
   maxReconnectAttempts?: number;
+  onQueryResponse?: (response: WSQueryResponse) => void;
 }
 
 interface UseWebSocketReturn {
@@ -15,6 +64,7 @@ interface UseWebSocketReturn {
   disconnect: () => void;
   sendQuery: (streamId: string, question: string) => string;
   reconnectAttempts: number;
+  pendingQueries: Map<string, { question: string; streamId: string }>;
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketReturn {
@@ -23,11 +73,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
     autoConnect = true,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
+    onQueryResponse,
   } = options;
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const pendingQueriesRef = useRef<Map<string, { question: string; streamId: string }>>(new Map());
 
   const { updateStatus, setConnected } = useStreamStore();
   const { addAlert } = useAlertStore();
@@ -55,6 +107,25 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
           case 'alert_new': {
             const alertMsg = message as WSAlert;
             addAlert(alertMsg.alert);
+
+            // Play audio cue for critical alerts
+            if (alertMsg.alert.level === 'critical') {
+              playAlertSound();
+            }
+            break;
+          }
+
+          case 'query_received': {
+            // Query acknowledged by server
+            console.log('Query received by server:', message);
+            break;
+          }
+
+          case 'query_response': {
+            // Query response from VLM
+            const response = message as WSQueryResponse;
+            pendingQueriesRef.current.delete(response.request_id);
+            onQueryResponse?.(response);
             break;
           }
 
@@ -70,7 +141,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
         console.error('Failed to parse WebSocket message:', error);
       }
     },
-    [updateStatus, addAlert]
+    [updateStatus, addAlert, onQueryResponse]
   );
 
   const connect = useCallback(() => {
@@ -127,6 +198,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
     const requestId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Track this query
+      pendingQueriesRef.current.set(requestId, { question, streamId });
+
       wsRef.current.send(
         JSON.stringify({
           type: 'query',
@@ -170,5 +244,6 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
     disconnect,
     sendQuery,
     reconnectAttempts,
+    pendingQueries: pendingQueriesRef.current,
   };
 }

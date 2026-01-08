@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Plus, Trash2, CheckCircle, Loader2, Video } from 'lucide-react';
+import { Plus, Trash2, CheckCircle, Loader2, Video, Wifi } from 'lucide-react';
 import { Button, Input, Card } from '@/components/common';
+import { ConnectionTestModal } from './ConnectionTestModal';
 import { useConfigStore } from '@/store';
 import { useConfigApi } from '@/hooks';
 import { cn } from '@/lib/utils';
@@ -28,6 +29,8 @@ export function FeedStep({ onNext, onBack }: FeedStepProps) {
   });
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('idle');
   const [connectionError, setConnectionError] = useState<string>('');
+  const [showTestModal, setShowTestModal] = useState(false);
+  const [testModalUri, setTestModalUri] = useState('');
 
   const handleInputChange = (field: keyof FeedFormData, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -49,6 +52,11 @@ export function FeedStep({ onNext, onBack }: FeedStepProps) {
       setConnectionStatus('error');
       setConnectionError(result?.error || 'Connection failed');
     }
+  };
+
+  const openTestModal = (uri: string) => {
+    setTestModalUri(uri);
+    setShowTestModal(true);
   };
 
   const handleAddFeed = () => {
@@ -175,11 +183,20 @@ export function FeedStep({ onNext, onBack }: FeedStepProps) {
                 key={feed.stream_id}
                 feed={feed}
                 onRemove={() => handleRemoveFeed(feed.stream_id)}
+                onTest={() => openTestModal(feed.source_uri)}
               />
             ))}
           </div>
         </Card>
       )}
+
+      {/* Connection Test Modal */}
+      <ConnectionTestModal
+        isOpen={showTestModal}
+        onClose={() => setShowTestModal(false)}
+        sourceUri={testModalUri}
+        feedName={feeds.find(f => f.source_uri === testModalUri)?.name}
+      />
 
       {/* Navigation */}
       <div className="flex justify-between mt-8">
@@ -201,9 +218,10 @@ export function FeedStep({ onNext, onBack }: FeedStepProps) {
 interface FeedListItemProps {
   feed: StreamConfig;
   onRemove: () => void;
+  onTest: () => void;
 }
 
-function FeedListItem({ feed, onRemove }: FeedListItemProps) {
+function FeedListItem({ feed, onRemove, onTest }: FeedListItemProps) {
   return (
     <div
       className={cn(
@@ -222,9 +240,14 @@ function FeedListItem({ feed, onRemove }: FeedListItemProps) {
           </p>
         </div>
       </div>
-      <Button variant="ghost" size="sm" onClick={onRemove}>
-        <Trash2 className="w-4 h-4 text-dark-400 hover:text-red-400" />
-      </Button>
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="sm" onClick={onTest} title="Test connection">
+          <Wifi className="w-4 h-4 text-dark-400 hover:text-blue-400" />
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onRemove} title="Remove feed">
+          <Trash2 className="w-4 h-4 text-dark-400 hover:text-red-400" />
+        </Button>
+      </div>
     </div>
   );
 }

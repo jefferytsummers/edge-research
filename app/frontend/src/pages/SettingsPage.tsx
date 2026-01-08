@@ -8,9 +8,11 @@ import {
   Trash2,
   RefreshCw,
   Plus,
+  Loader2,
 } from 'lucide-react';
 import { Button, Card, Input, Textarea } from '@/components/common';
 import { useConfigStore } from '@/store';
+import { useConfigApi } from '@/hooks';
 import { cn, truncate } from '@/lib/utils';
 import type { ProtocolRules } from '@/types';
 
@@ -18,22 +20,55 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const { feeds, protocols, setProtocols, removeFeed, addFeed, resetConfig } =
     useConfigStore();
+  const { addFeed: addFeedApi, deleteFeed: deleteFeedApi, saveProtocols, loading, error } = useConfigApi();
 
   const [editingProtocols, setEditingProtocols] = useState(false);
   const [localProtocols, setLocalProtocols] = useState<ProtocolRules>(protocols);
   const [showAddFeed, setShowAddFeed] = useState(false);
   const [newFeed, setNewFeed] = useState({ name: '', source_uri: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSaveProtocols = () => {
-    setProtocols(localProtocols);
-    setEditingProtocols(false);
+  const handleSaveProtocols = async () => {
+    setIsSubmitting(true);
+    try {
+      const success = await saveProtocols(localProtocols);
+      if (success) {
+        setProtocols(localProtocols);
+        setEditingProtocols(false);
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleAddFeed = () => {
+  const handleAddFeed = async () => {
     if (newFeed.name && newFeed.source_uri) {
-      addFeed(newFeed);
-      setNewFeed({ name: '', source_uri: '' });
-      setShowAddFeed(false);
+      setIsSubmitting(true);
+      try {
+        const result = await addFeedApi(newFeed);
+        if (result) {
+          addFeed({ ...newFeed, stream_id: result.stream_id, enabled: true });
+          setNewFeed({ name: '', source_uri: '' });
+          setShowAddFeed(false);
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
+    }
+  };
+
+  const handleDeleteFeed = async (streamId: string) => {
+    if (!window.confirm('Are you sure you want to delete this feed?')) {
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const success = await deleteFeedApi(streamId);
+      if (success) {
+        removeFeed(streamId);
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -74,6 +109,15 @@ export function SettingsPage() {
 
       {/* Main Content */}
       <main className="max-w-3xl mx-auto px-6 py-6 space-y-6">
+        {/* Error Display */}
+        {error && (
+          <Card className="bg-red-950/30 border-red-500/30">
+            <div className="flex items-center gap-2 text-red-400">
+              <span>Error: {error}</span>
+            </div>
+          </Card>
+        )}
+
         {/* Camera Feeds Section */}
         <Card>
           <div className="flex items-center justify-between mb-4">
@@ -118,15 +162,16 @@ export function SettingsPage() {
                     variant="ghost"
                     size="sm"
                     onClick={() => setShowAddFeed(false)}
+                    disabled={isSubmitting}
                   >
                     Cancel
                   </Button>
                   <Button
                     size="sm"
                     onClick={handleAddFeed}
-                    disabled={!newFeed.name || !newFeed.source_uri}
+                    disabled={!newFeed.name || !newFeed.source_uri || isSubmitting}
                   >
-                    Add
+                    {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
                   </Button>
                 </div>
               </div>
@@ -149,7 +194,8 @@ export function SettingsPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => removeFeed(feed.stream_id)}
+                  onClick={() => handleDeleteFeed(feed.stream_id)}
+                  disabled={isSubmitting}
                   className="text-dark-400 hover:text-red-400"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -217,10 +263,14 @@ export function SettingsPage() {
                     setLocalProtocols(protocols);
                     setEditingProtocols(false);
                   }}
+                  disabled={isSubmitting}
                 >
                   Cancel
                 </Button>
-                <Button onClick={handleSaveProtocols}>Save Changes</Button>
+                <Button onClick={handleSaveProtocols} disabled={isSubmitting}>
+                  {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                  Save Changes
+                </Button>
               </div>
             </div>
           ) : (

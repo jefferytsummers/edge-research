@@ -5,6 +5,8 @@ export {
   useAllStatuses,
   useStreamHistory,
   useSeverityCounts,
+  useLastUpdateTime,
+  STALE_THRESHOLD_MS,
 } from './streamStore';
 export {
   useAlertStore,

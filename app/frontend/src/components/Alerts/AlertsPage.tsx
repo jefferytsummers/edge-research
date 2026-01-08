@@ -1,15 +1,40 @@
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, Bell, History } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, Bell, History, Loader2, RefreshCw } from 'lucide-react';
 import { Button, Card } from '@/components/common';
 import { AlertCard } from './AlertCard';
 import { useAlertStore, useActiveAlerts, useCriticalAlerts } from '@/store';
+import { useAlertsApi } from '@/hooks';
 import { cn } from '@/lib/utils';
 
 export function AlertsPage() {
   const navigate = useNavigate();
   const alerts = useAlertStore((state) => state.alerts);
+  const setAlerts = useAlertStore((state) => state.setAlerts);
   const activeAlerts = useActiveAlerts();
   const criticalAlerts = useCriticalAlerts();
+  const { getAlerts, loading, error } = useAlertsApi();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Load alerts from backend on mount
+  useEffect(() => {
+    async function loadAlerts() {
+      const fetchedAlerts = await getAlerts();
+      if (fetchedAlerts) {
+        setAlerts(fetchedAlerts);
+      }
+    }
+    loadAlerts();
+  }, [getAlerts, setAlerts]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    const fetchedAlerts = await getAlerts();
+    if (fetchedAlerts) {
+      setAlerts(fetchedAlerts);
+    }
+    setIsRefreshing(false);
+  };
 
   const resolvedAlerts = alerts.filter((a) => a.resolved_at);
   const warningAlerts = activeAlerts.filter((a) => a.level === 'warning');
@@ -34,23 +59,55 @@ export function AlertsPage() {
                 Alerts
               </h1>
             </div>
-            {criticalAlerts.length > 0 && (
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/20 rounded-lg">
-                <AlertTriangle className="w-4 h-4 text-red-400" />
-                <span className="text-sm font-medium text-red-400">
-                  {criticalAlerts.length} Critical Alert
-                  {criticalAlerts.length !== 1 ? 's' : ''}
-                </span>
-              </div>
-            )}
+            <div className="flex items-center gap-3">
+              {criticalAlerts.length > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/20 rounded-lg">
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                  <span className="text-sm font-medium text-red-400">
+                    {criticalAlerts.length} Critical Alert
+                    {criticalAlerts.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={loading || isRefreshing}
+              >
+                <RefreshCw className={cn("w-4 h-4", (loading || isRefreshing) && "animate-spin")} />
+                Refresh
+              </Button>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 py-6">
+        {/* Error state */}
+        {error && (
+          <Card className="mb-6 bg-red-950/30 border-red-500/30">
+            <div className="flex items-center gap-3 text-red-400">
+              <AlertTriangle className="w-5 h-5" />
+              <span>Failed to load alerts: {error}</span>
+              <Button variant="ghost" size="sm" onClick={handleRefresh}>
+                Retry
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {/* Loading state */}
+        {loading && alerts.length === 0 && (
+          <Card className="text-center py-16">
+            <Loader2 className="w-8 h-8 text-dark-400 mx-auto mb-4 animate-spin" />
+            <p className="text-dark-400">Loading alerts...</p>
+          </Card>
+        )}
+
         {/* No alerts state */}
-        {alerts.length === 0 && (
+        {!loading && alerts.length === 0 && (
           <Card className="text-center py-16">
             <Bell className="w-12 h-12 text-dark-600 mx-auto mb-4" />
             <h2 className="text-lg font-medium text-dark-300 mb-2">

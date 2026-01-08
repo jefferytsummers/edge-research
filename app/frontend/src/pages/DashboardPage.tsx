@@ -1,13 +1,11 @@
 import { useNavigate } from 'react-router-dom';
-import { Settings, Bell, Wifi, WifiOff } from 'lucide-react';
-import { Button } from '@/components/common';
+import { Settings, Bell } from 'lucide-react';
+import { Button, ConnectionStatus } from '@/components/common';
 import { FeedGrid, StatusSummary, ActivityLog, PipelineStatusBanner, ModelStatusIndicator } from '@/components/Dashboard';
-import { useStreamStore, useUnacknowledgedCount } from '@/store';
-import { cn } from '@/lib/utils';
+import { useUnacknowledgedCount } from '@/store';
 
 export function DashboardPage() {
   const navigate = useNavigate();
-  const isConnected = useStreamStore((state) => state.isConnected);
   const alertCount = useUnacknowledgedCount();
 
   return (
@@ -20,26 +18,7 @@ export function DashboardPage() {
               <h1 className="text-xl font-bold text-dark-100">Newport Demo</h1>
 
               {/* Connection Status */}
-              <div
-                className={cn(
-                  'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm',
-                  isConnected
-                    ? 'bg-green-500/20 text-green-400'
-                    : 'bg-yellow-500/20 text-yellow-400'
-                )}
-              >
-                {isConnected ? (
-                  <>
-                    <Wifi className="w-4 h-4" />
-                    <span className="hidden sm:inline">Monitoring</span>
-                  </>
-                ) : (
-                  <>
-                    <WifiOff className="w-4 h-4" />
-                    <span className="hidden sm:inline">Connecting...</span>
-                  </>
-                )}
-              </div>
+              <ConnectionStatus className="px-3 py-1.5 rounded-lg" />
 
               {/* AI Model Status */}
               <ModelStatusIndicator />

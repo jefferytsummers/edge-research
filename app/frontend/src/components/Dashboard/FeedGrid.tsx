@@ -1,15 +1,35 @@
+import { useMemo } from 'react';
 import { FeedCard } from './FeedCard';
 import { useConfigStore, useStreamStore } from '@/store';
 import { cn } from '@/lib/utils';
-import type { StreamConfig } from '@/types';
+import type { StreamConfig, Severity } from '@/types';
 
 interface FeedGridProps {
   onFeedClick?: (feed: StreamConfig) => void;
 }
 
+// Severity priority for sorting (higher = more urgent, shows first)
+const SEVERITY_PRIORITY: Record<Severity, number> = {
+  red: 3,
+  yellow: 2,
+  green: 1,
+};
+
 export function FeedGrid({ onFeedClick }: FeedGridProps) {
   const feeds = useConfigStore((state) => state.feeds);
   const statuses = useStreamStore((state) => state.statuses);
+
+  // Sort feeds by severity (RED first, then YELLOW, then GREEN)
+  const sortedFeeds = useMemo(() => {
+    return [...feeds].sort((a, b) => {
+      const severityA = statuses[a.stream_id]?.severity || 'green';
+      const severityB = statuses[b.stream_id]?.severity || 'green';
+      const priorityA = SEVERITY_PRIORITY[severityA];
+      const priorityB = SEVERITY_PRIORITY[severityB];
+      // Higher priority first (descending)
+      return priorityB - priorityA;
+    });
+  }, [feeds, statuses]);
 
   if (feeds.length === 0) {
     return (
@@ -34,7 +54,7 @@ export function FeedGrid({ onFeedClick }: FeedGridProps) {
 
   return (
     <div className={gridCols}>
-      {feeds.map((feed) => (
+      {sortedFeeds.map((feed) => (
         <FeedCard
           key={feed.stream_id}
           feed={feed}

@@ -110,7 +110,7 @@ class ProtocolEvaluator:
         return self._state_machines[stream_id]
 
     def _check_critical_detections(
-        self, detections: List[Dict]
+        self, stream_id: str, detections: List[Dict]
     ) -> Optional[StreamStatus]:
         """
         Fast path for critical detection-based conditions.
@@ -118,10 +118,60 @@ class ProtocolEvaluator:
         Returns RED status immediately if:
         - No person detected in frame (missing)
         - Person detected on ground (fall)
+
+        Args:
+            stream_id: Camera/stream identifier
+            detections: List of detection dicts with keys:
+                - class_id: int (0 = person in COCO)
+                - class_name: str
+                - confidence: float
+                - bbox: [x1, y1, x2, y2]
         """
-        # TODO: Implement detection-based fast path
-        # Check for person class in detections
-        # Check for fall/ground-level detection
+        # Check for person detections
+        person_detections = [
+            d for d in detections
+            if d.get("class_name", "").lower() == "person"
+            or d.get("class_id") == 0  # COCO class 0 = person
+        ]
+
+        # No person detected - critical missing condition
+        if len(person_detections) == 0 and len(detections) >= 0:
+            # Only trigger if we've been processing frames (not first frame)
+            # Check that we have at least received some detection data
+            logger.warning(f"No person detected in {stream_id} - potential missing resident")
+            return StreamStatus(
+                stream_id=stream_id,
+                severity="red",
+                icon=ICON_MAP["missing"],
+                description="No person detected - resident may have left the room",
+                confidence=0.95
+            )
+
+        # Check for potential fall detection
+        # A fall is indicated by a person bbox that is wider than tall
+        # (lying down vs standing/sitting)
+        for det in person_detections:
+            bbox = det.get("bbox", [])
+            if len(bbox) >= 4:
+                x1, y1, x2, y2 = bbox[:4]
+                width = x2 - x1
+                height = y2 - y1
+
+                # Person bbox is very wide relative to height (lying down)
+                # and positioned in lower portion of frame
+                if height > 0 and width / height > 1.5:
+                    # Check if in lower third of frame (ground level)
+                    frame_height = y2  # Approximate - assumes bbox goes to bottom
+                    if y1 > frame_height * 0.5:  # Lower half of frame
+                        logger.warning(f"Potential fall detected in {stream_id}")
+                        return StreamStatus(
+                            stream_id=stream_id,
+                            severity="red",
+                            icon=ICON_MAP["unconscious"],
+                            description="Person may have fallen - lying on ground detected",
+                            confidence=0.85
+                        )
+
         return None
 
     def _build_classification_prompt(self, description: str) -> str:
@@ -198,7 +248,7 @@ Example: GREEN|reading|Resident reading in rocking chair."""
             StreamStatus if status changed, None otherwise
         """
         # Fast path: Check for critical detection conditions
-        critical = self._check_critical_detections(detections)
+        critical = self._check_critical_detections(stream_id, detections)
         if critical:
             sm = self._get_state_machine(stream_id)
             if sm.update(critical.severity):

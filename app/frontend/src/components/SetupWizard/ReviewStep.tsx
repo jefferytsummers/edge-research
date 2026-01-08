@@ -13,23 +13,39 @@ interface ReviewStepProps {
 
 export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
   const { feeds, protocols, markConfigured } = useConfigStore();
-  const { saveProtocols, error } = useConfigApi();
+  const { addFeed, saveProtocols, error } = useConfigApi();
   const [saveConfig, setSaveConfig] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const handleStartMonitoring = async () => {
     setIsSubmitting(true);
+    setSaveError(null);
 
     try {
+      // Save all feeds to backend
+      for (const feed of feeds) {
+        const result = await addFeed({
+          name: feed.name,
+          source_uri: feed.source_uri,
+        });
+        if (!result) {
+          throw new Error(`Failed to save feed: ${feed.name}`);
+        }
+      }
+
       // Save protocols to backend
       const success = await saveProtocols(protocols);
 
       if (success) {
         markConfigured();
         onComplete();
+      } else {
+        throw new Error('Failed to save protocols');
       }
     } catch (err) {
       console.error('Failed to save configuration:', err);
+      setSaveError(err instanceof Error ? err.message : 'Failed to save configuration');
     } finally {
       setIsSubmitting(false);
     }
@@ -114,9 +130,9 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
       </Card>
 
       {/* Error Display */}
-      {error && (
+      {(error || saveError) && (
         <div className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
-          {error}
+          {saveError || error}
         </div>
       )}
 

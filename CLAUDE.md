@@ -200,18 +200,31 @@ edge-research/
 │   ├── Dockerfile         # Python 3.11-slim based
 │   ├── requirements.txt   # Python dependencies
 │   ├── src/               # FastAPI application
-│   │   ├── main.py       # Entry point
+│   │   ├── main.py       # Entry point with lifespan
 │   │   ├── config.py     # Settings via pydantic-settings
 │   │   ├── models.py     # Pydantic data models
 │   │   ├── event_bus.py  # Redis pub/sub + local events
-│   │   └── websocket.py  # WebSocket handlers
+│   │   ├── websocket.py  # WebSocket handlers + Q&A forwarding
+│   │   ├── routes.py     # REST API endpoints
+│   │   └── storage.py    # SQLite persistence adapter
 │   ├── tests/             # pytest tests
 │   └── frontend/          # React + Vite + TypeScript
+│       └── src/
+│           ├── components/
+│           │   ├── common/       # Button, Card, Input, Skeleton, ErrorBoundary
+│           │   ├── Dashboard/    # FeedGrid, FeedCard, StatusSummary
+│           │   ├── SetupWizard/  # FeedStep, ProtocolStep, ReviewStep
+│           │   ├── FeedView/     # ExpandedFeed, QuestionInput, StatusHistory
+│           │   └── Alerts/       # AlertsPage, AlertCard
+│           ├── hooks/            # useWebSocket, useConfigApi, useAlertsApi
+│           ├── store/            # Zustand stores (config, stream, alert)
+│           ├── pages/            # DashboardPage, SettingsPage
+│           └── types/            # TypeScript interfaces
 │
 ├── vlm/                    # VLM inference (extends dustynv/nano_llm)
 │   ├── Dockerfile         # Adds redis, Pillow
 │   ├── src/
-│   │   ├── protocol_evaluator.py  # Severity classification
+│   │   ├── protocol_evaluator.py  # Severity classification + fast path
 │   │   └── vlm_subscriber.py      # Redis subscriber
 │   └── tests/
 │
@@ -224,6 +237,7 @@ edge-research/
 │
 ├── docker-compose.yml     # Container orchestration
 ├── Makefile               # Development commands
+├── RALPH-LOOP.md          # Iterative development state tracking
 └── docs/                  # Documentation
 ```
 
@@ -371,13 +385,16 @@ DeepStream and VLM containers require NVIDIA runtime:
 
 ## Project Status
 
-See `AGILE-PLAN.md` for full backlog. Current focus:
+See `RALPH-LOOP.md` for detailed progress tracking. **MVP is FEATURE COMPLETE.**
 
-- **Sprint N1**: Multi-container foundation (in progress)
-- **Sprint N2**: DeepStream + VLM pipeline
-- **Sprint N3**: Setup Wizard + Dashboard UI
-- **Sprint N4**: Alerts + Polish
-- **Sprint N5**: Demo mode
+### Completed Features:
+- **Backend**: SQLite persistence, REST API, WebSocket, Q&A forwarding
+- **Frontend**: Setup Wizard, Dashboard, Alerts, Settings, Q&A interface
+- **Infrastructure**: Docker containers, Redis pub/sub, health checks
+
+### Remaining Work:
+- **P1.1**: Actual VLM inference calls (requires GPU container)
+- **N3.2**: Multi-stream batching (optimization)
 
 ---
 

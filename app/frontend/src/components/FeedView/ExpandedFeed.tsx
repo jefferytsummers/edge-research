@@ -1,19 +1,60 @@
+import { useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Video, Settings, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Video, Settings, AlertTriangle, MessageSquare, Loader2 } from 'lucide-react';
 import { Button, Card, StatusPill } from '@/components/common';
 import { QuestionInput } from './QuestionInput';
 import { StatusHistory } from './StatusHistory';
 import { useConfigStore, useStreamStatus } from '@/store';
+import { useWebSocket } from '@/hooks';
 import { cn, formatTimestamp } from '@/lib/utils';
-import type { Severity } from '@/types';
+import type { Severity, WSQueryResponse } from '@/types';
+
+interface QAEntry {
+  id: string;
+  question: string;
+  answer?: string;
+  timestamp: string;
+  isLoading: boolean;
+}
 
 export function ExpandedFeed() {
   const { streamId } = useParams<{ streamId: string }>();
   const navigate = useNavigate();
+  const [qaHistory, setQaHistory] = useState<QAEntry[]>([]);
 
   const feeds = useConfigStore((state) => state.feeds);
   const feed = feeds.find((f) => f.stream_id === streamId);
   const status = useStreamStatus(streamId || '');
+
+  // Handle Q&A responses from WebSocket
+  const handleQueryResponse = useCallback((response: WSQueryResponse) => {
+    setQaHistory((prev) =>
+      prev.map((entry) =>
+        entry.id === response.request_id
+          ? { ...entry, answer: response.answer, isLoading: false }
+          : entry
+      )
+    );
+  }, []);
+
+  // Connect WebSocket with response handler
+  useWebSocket({
+    autoConnect: true,
+    onQueryResponse: handleQueryResponse,
+  });
+
+  // Track sent questions
+  const handleQuestionSent = (question: string, requestId: string) => {
+    setQaHistory((prev) => [
+      {
+        id: requestId,
+        question,
+        timestamp: new Date().toISOString(),
+        isLoading: true,
+      },
+      ...prev,
+    ].slice(0, 10)); // Keep last 10 Q&A pairs
+  };
 
   if (!feed || !streamId) {
     return (
@@ -153,10 +194,46 @@ export function ExpandedFeed() {
             <Card>
               <QuestionInput
                 streamId={streamId}
-                onQuestionSent={(q, id) => {
-                  console.log('Question sent:', q, id);
-                }}
+                onQuestionSent={handleQuestionSent}
               />
+
+              {/* Q&A History */}
+              {qaHistory.length > 0 && (
+                <div className="mt-6 pt-6 border-t border-dark-700">
+                  <h4 className="text-sm font-medium text-dark-300 mb-4 flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4" />
+                    Conversation History
+                  </h4>
+                  <div className="space-y-4">
+                    {qaHistory.map((entry) => (
+                      <div key={entry.id} className="space-y-2">
+                        {/* Question */}
+                        <div className="flex items-start gap-2">
+                          <span className="text-xs text-blue-400 font-medium mt-0.5">Q:</span>
+                          <p className="text-sm text-dark-200">{entry.question}</p>
+                        </div>
+                        {/* Answer */}
+                        <div className="flex items-start gap-2 pl-4">
+                          <span className="text-xs text-green-400 font-medium mt-0.5">A:</span>
+                          {entry.isLoading ? (
+                            <div className="flex items-center gap-2 text-dark-400">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span className="text-sm">Analyzing...</span>
+                            </div>
+                          ) : (
+                            <p className="text-sm text-dark-300">
+                              {entry.answer || 'No response received'}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-xs text-dark-600 pl-4">
+                          {formatTimestamp(entry.timestamp)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </Card>
           </div>
 

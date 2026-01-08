@@ -19,6 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from .config import Settings, get_settings, configure_logging
 from .event_bus import EventBus
 from .models import HealthStatus, ServiceInfo
+from .routes import router as api_router
+from .storage import init_storage
 from .websocket import router as ws_router, setup_event_handlers
 
 # Configure logging on module load
@@ -41,6 +43,13 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Debug mode: {settings.debug}")
+
+    # Initialize storage
+    try:
+        storage = init_storage()
+        logger.info(f"Storage initialized at {storage.db_path}")
+    except Exception as e:
+        logger.error(f"Failed to initialize storage: {e}")
 
     # Startup
     try:
@@ -109,6 +118,7 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
+    app.include_router(api_router)
     app.include_router(ws_router)
 
     return app
